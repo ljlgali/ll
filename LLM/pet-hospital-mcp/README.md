@@ -1,0 +1,215 @@
+# Pet Hospital MCP
+
+A **stateless** [Model Context Protocol](https://modelcontextprotocol.io) server that exposes the Go **Pet Hospital REST API** to AI agents, built on the official Python SDK 2.x.
+
+> 本阶段只实现一个工具：`list_pets`（阶段二工具未实现）。
+
+## 技术栈 / 版本
+
+| 项 | 值 |
+| --- | --- |
+| Python | 3.11+ |
+| 官方 Python SDK | `mcp==2.0.0` |
+| MCP 协议版本 | `2026-07-28` |
+| 服务端类 | `MCPServer`（`from mcp.server.mcpserver import MCPServer`） |
+| 传输模型 | Streamable HTTP，**无状态**（不使用 `mcp.server.fastmcp.FastMCP`） |
+| 协议特性 | 不实现 `initialize`、不要求/返回 `Mcp-Session-Id`、无会话存储/过期；内置 `server/discover` |
+
+## 先决条件
+
+1. **Go 宠物医院服务必须先启动**（默认监听 `127.0.0.1:8080`）：
+   ```bat
+   :: 在 pethospital.exe 所在目录
+   pethospital.exe
+   ```
+   健康检查：`curl.exe http://127.0.0.1:8080/health`
+2. 安装本 MCP 服务（建议用虚拟环境）：
+   ```bash
+   cd pet_hospital_mcp
+   python -m venv .venv
+   # Windows:
+   .venv\Scripts\python.exe -m pip install -e ".[test]"
+   # macOS / Linux:
+   .venv/bin/python -m pip install -e ".[test]"
+   ```
+
+## 配置（环境变量）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PET_HOSPITAL_BASE_URL` | `http://127.0.0.1:8080` | 上游 Go REST API 地址 |
+| `MCP_HOST` | `127.0.0.1` | MCP 服务监听地址（默认仅本机） |
+| `MCP_PORT` | `8000` | MCP 服务监听端口 |
+| `MCP_ENDPOINT_PATH` | `/mcp` | MCP JSON-RPC 端点路径 |
+| `MCP_BACKEND_TIMEOUT` | `5.0` | 上游请求超时（秒） |
+| `MCP_BACKEND_RETRIES` | `2` | 上游瞬态错误重试次数 |
+
+## 启动 MCP 服务
+
+```bash
+cd pet_hospital_mcp
+python -m pet_hospital_mcp
+# 或（安装了脚本入口）：
+pet-hospital-mcp
+```
+
+启动后：
+- MCP 端点：`http://127.0.0.1:8000/mcp`
+- 健康检查：`http://127.0.0.1:8000/health`
+
+## `list_pets` 工具
+
+对应 Go REST API 的 `GET /api/v1/pets`。Python 工具函数签名为 `async def list_pets(args: ListPetsArgs)`，因此 wire 层的 `arguments` 必须以 `{"args": { ... }}` 形式嵌套；`args` 内支持的字段均为可选，camelCase 与 Go 查询参数一致：
+
+`q` `name` `ownerName` `ownerPhone` `species` `doctor` `disease` `status`
+`min` `max` `sortBy` `order` `page` `pageSize`
+
+校验规则（比后端更严格）：
+- `species` ∈ {犬, 猫, 兔, 鸟, 仓鼠, 爬宠, 其他}
+- `status` ∈ {待就诊, 就诊中, 住院中, 已康复, 慢性病随访}
+- `sortBy` ∈ {id, name, ownerName, species, doctor, disease, status, totalCost, visitCount, createdAt, updatedAt}
+- `order` ∈ {asc, desc}
+- `page >= 1`；`1 <= pageSize <= 500`
+- `min`、`max` 非负且 `min <= max`；拒绝 `NaN`/`Infinity`
+- 拒绝未知字段与类型不正确的输入
+
+成功输出对应 Go `data`：`items`、`total`、`page`、`pageSize`、`totalPages`、`totalCost`；`items[].records` / `charges` 兼容 `null` 或数组。
+
+**真实返回示例**（`species=犬, page=1, pageSize=3`）：
+```json
+{
+  "items": [
+    {
+      "id": "PET-000085",
+      "name": " Lucky",
+      "species": "犬",
+      "breed": "萨摩耶",
+      "gender": "公",
+      "ageMonths": 164,
+      "color": "奶白",
+      "chipNo": "CHIP-518058",
+      "ownerName": "邓女士",
+      "ownerPhone": "18452353611",
+      "ownerAddr": "重庆市江北区建...",
+      "doctor": "...",
+      "disease": "...",
+      "status": "已康复",
+      "records": null,
+      "charges": null,
+      "totalCost": 0.0,
+      "visitCount": 0,
+      "createdAt": "...",
+      "updatedAt": "..."
+    }
+    // ... 共 3 条
+  ],
+  "total": 446,
+  "page": 1,
+  "pageSize": 3,
+  "totalPages": 149,
+  "totalCost": 1741571.59
+}
+```
+
+失败输出为统一错误结构：
+```json
+{"error": {"code": "ERROR_CODE", "message": "...", "details": {}}}
+```
+错误码：`VALIDATION_ERROR`、`BACKEND_TIMEOUT`、`BACKEND_UNAVAILABLE`、`BACKEND_API_ERROR`、`BACKEND_INVALID_RESPONSE`、`INTERNAL_ERROR`。
+
+## 验证步骤
+
+### `/health` 示例
+```bash
+curl.exe http://127.0.0.1:8000/health
+# {"status":"ok","service":"pet-hospital-mcp","version":"1.0.0","protocol_version":"2026-07-28"}
+```
+
+### 用 MCP Inspector 验证
+```bash
+npx @modelcontextprotocol/inspector http://127.0.0.1:8000/mcp
+```
+
+### 用 SDK 2.x 客户端调用 `list_pets`
+```python
+import anyio
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+
+async def main():
+    # 注意：高层 Client 直接接收 Transport 实例，不再接收 (read, write) 流。
+    # streamable_http_client 是被 @asynccontextmanager 装饰的对象，
+    # SDK 在进入 Client 的异步上下文时会自动 await 它。
+    transport = streamable_http_client("http://127.0.0.1:8000/mcp")
+    async with Client(transport) as client:
+        result = await client.list_tools()
+        print([t.name for t in result.tools])    # ['list_pets']
+        # 工具函数签名为 `async def list_pets(args: ListPetsArgs)`，
+        # 因此 wire 层的 arguments 必须嵌套在 "args" 字段下。
+        result = await client.call_tool(
+            "list_pets",
+            {"args": {"species": "犬", "page": 1, "pageSize": 5}},
+        )
+        # 失败时 result.is_error == True（snake_case 属性，不是 isError）。
+        print(result.is_error, result.content)
+
+anyio.run(main)
+```
+
+### 无状态 HTTP 调用示例（2026-07-28，单次请求即响应，无 `Mcp-Session-Id`）
+```bash
+curl.exe -s -X POST http://127.0.0.1:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'MCP-Method: tools/call' \
+  -H 'MCP-Name: list_pets' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},"name":"list_pets","arguments":{"args":{"species":"犬","page":1,"pageSize":5}}}}'
+```
+
+**2026-07-28 协议要点（与旧版 1.x 的关键差异）：**
+- 请求体 `params._meta` 必须携带 `io.modelcontextprotocol/protocolVersion` 与 `io.modelcontextprotocol/clientCapabilities` 两个 envelope 键，否则返回 `400 Invalid Request`。
+- 请求头必须含 `MCP-Protocol-Version`（与 envelope 内的协议版本一致）和 `MCP-Method`（与 body 的 `method` 一致）。
+- 对带名称的方法（`tools/call`、`prompts/get`、`resources/read`），请求头还需 `MCP-Name`，其值必须等于 `params.name`。
+- 工具入参 `arguments` 必须嵌套在 `args` 字段下（即 `arguments.args.<field>`），因为 Python 工具函数签名 `async def list_pets(args: ListPetsArgs)` 被 SDK 自动转成 Pydantic 模型 `list_petsArguments`，单一 Pydantic 参数会被提取为 `$defs` 内的 `$ref`。
+- 响应中**不会**出现 `Mcp-Session-Id` 头，每个请求自包含、自洽。
+
+## 单元测试
+
+测试**不访问真实 Go 服务**（用 `httpx.MockTransport` / `respx` 模拟上游）：
+```bash
+cd pet_hospital_mcp
+pytest -q
+```
+覆盖：正常调用（参数转发）、输入校验失败、4xx/5xx、超时/连接异常、非法 JSON / 不符模型、工具注册与 JSON Schema、无状态 HTTP 流程（不发送 `initialize`、无 `Mcp-Session-Id`、`server/discover`、`tools/list`、`tools/call`）、`/health`。
+
+**预期结果**：
+```
+...................................                                      [100%]
+35 passed in 0.37s
+```
+（35 项：`test_rest_client.py` 上游客户端 + `test_validation.py` 输入校验 + `test_server_and_protocol.py` 协议/工具/无状态 HTTP/健康检查。）
+
+## 项目结构
+```text
+pet_hospital_mcp/
+├── pyproject.toml
+├── README.md
+├── UPGRADE_PROMPT.md
+├── src/pet_hospital_mcp/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── config.py
+│   ├── server.py
+│   ├── rest_client.py
+│   ├── errors.py
+│   ├── logging_config.py
+│   └── tools/
+│       ├── __init__.py
+│       └── list_pets.py
+└── tests/
+```
+
+## 阶段说明
+- 本阶段仅实现 `list_pets` 工具。
+- **未实现阶段二工具**（新增宠物、查询详情、追加病历/收费等），后续阶段只需在 `tools/` 增加模块并复用 `rest_client`、`errors`、`logging_config`。

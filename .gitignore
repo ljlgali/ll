@@ -12,4 +12,6 @@ env/
 # 系统文件
 .DS_Store
 Thumbs.db
+
 config.ini
+Agent/Practice01/config.ini

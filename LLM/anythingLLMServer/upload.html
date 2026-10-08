@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>上传文档到 AnythingLLM</title>
+</head>
+<body>
+<h3>上传文档（自动向量化嵌入）</h3>
+<input type="file" id="f">
+<button onclick="upload()">上传</button>
+<p id="msg"></p>
+
+<script>
+const KEY = "W4938X4-63RMMTG-JXY5K7R-GFJMR26";
+const API = "http://localhost:3001/api/v1";
+
+async function upload() {
+  const file = document.getElementById("f").files[0];
+  if (!file) return alert("请选择文件");
+
+  // 1. 获取第一个工作区 slug
+  const res = await fetch(`${API}/workspaces`, { headers: { Authorization: `Bearer ${KEY}` } });
+  const data = await res.json();
+  const slug = data.workspaces[0].slug;
+
+  // 2. 上传并嵌入
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("addToWorkspaces", slug);
+
+  const up = await fetch(`${API}/document/upload`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${KEY}` },
+    body: fd
+  });
+
+  const result = await up.json();
+  document.getElementById("msg").textContent = up.ok
+    ? `✅ 上传成功，已嵌入工作区：${slug}`
+    : `❌ 失败：${JSON.stringify(result)}`;
+}
+</script>
+</body>
+</html>

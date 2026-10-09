@@ -1,4 +1,0 @@
-mcp
-httpx
-uvicorn
-python-dotenv

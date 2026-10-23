@@ -1,0 +1,99 @@
+%% chat.py 代码架构图（Mermaid flowchart）
+%% 说明：实线箭头为主流程，虚线箭头为数据/依赖关系
+
+flowchart TD
+
+    %% ================= 启动与配置 =================
+    subgraph CFG["启动配置层"]
+        A1["import 依赖<br/>openai / configparser / json / os / shutil / mimetypes / time / datetime"]
+        A2["全局常量<br/>DELAY = 0.02<br/>TEXT_EXTS 纯文本扩展名集合"]
+        A3["configparser 读取 config.ini<br/>base_url / api_key / model"]
+        A4["创建 OpenAI client<br/>（兼容 OpenAI 接口的大模型客户端）"]
+        A1 --> A2 --> A3 --> A4
+    end
+
+    %% ================= 静态定义 =================
+    subgraph DEF["请求定义层"]
+        B1["tools：工具描述列表<br/>JSON Schema 形式声明 12 个 function"]
+        B2["messages：会话历史<br/>system 提示词（角色与工具调用规范）"]
+    end
+
+    A4 --> B1
+    A4 --> B2
+
+    %% ================= 主循环 =================
+    subgraph MAIN["主交互循环 while True"]
+        C1["input 读取用户 prompt"]
+        C2["messages.append<br/>role = user"]
+        C3["client.chat.completions.create<br/>stream=True + tools + tool_choice=auto"]
+        C4["遍历 chunk 增量解析<br/>delta.content → 逐字打印（sleep DELAY）<br/>delta.tool_calls → 累积 calls{id,name,arguments}"]
+        C5{"calls 是否为空？"}
+        C6["messages.append<br/>role = assistant（最终回答）"]
+        C7["messages.append<br/>role = assistant + tool_calls"]
+        C8["逐个分发执行工具<br/>json.loads 解析 arguments<br/>print LOG"]
+        C9["messages.append<br/>role = tool + tool_call_id + result"]
+
+        C1 --> C2 --> C3 --> C4 --> C5
+        C5 -- "是：已得到最终回答" --> C6
+        C6 --> C1
+        C5 -- "否：需要调用工具" --> C7 --> C8 --> C9
+        C9 -->|"带着工具结果再次请求模型"| C3
+    end
+
+    B1 -.->|"tools 参数"| C3
+    B2 -.->|"messages 历史"| C3
+
+    %% ================= 工具实现层 =================
+    subgraph TOOLS["工具实现层（本地函数）"]
+        subgraph T_TIME["时间日期工具"]
+            T1["getDate → get_current_time()<br/>datetime.now() 格式化 %Y-%m-%d %H:%M:%S"]
+            T2["isLeapYear → is_leap_year(year)<br/>（4% 且非 100%）或 400% 判闰年<br/>返回工具名 + 结果 + 判断依据"]
+        end
+        subgraph T_FS["文件系统工具"]
+            T3["getCwd → get_cwd()<br/>os.getcwd()"]
+            T4["listFiles → list_files(path)<br/>os.listdir 分类子目录 / 文件"]
+            T5["getFileType → get_file_type(path)<br/>扩展名 + mimetypes + TEXT_EXTS 判定"]
+            T6["readFile → read_file(path)<br/>仅 TEXT_EXTS，UTF-8 读取"]
+            T7["createFile → create_file(dir, filename, content)<br/>存在则报错，否则新建写入"]
+            T8["editFile → edit_file(path, content, mode)<br/>overwrite 覆盖 / append 追加"]
+            T9["createDir → create_dir(path)<br/>os.makedirs"]
+            T10["deleteDir → delete_dir(path)<br/>统计文件数 + shutil.rmtree"]
+            T11["deleteFile → delete_file(path)<br/>os.remove"]
+            T12["renamePath → rename_path(path, new_name)<br/>同目录 os.rename，重名则报错"]
+        end
+        T13["异常兜底：未知工具返回错误信息"]
+    end
+
+    C8 --> T_TIME
+    C8 --> T_FS
+    C8 --> T13
+    T1 --> C9
+    T2 --> C9
+    T3 --> C9
+    T4 --> C9
+    T5 --> C9
+    T6 --> C9
+    T7 --> C9
+    T8 --> C9
+    T9 --> C9
+    T10 --> C9
+    T11 --> C9
+    T12 --> C9
+    T13 --> C9
+
+    %% ================= 外部依赖 =================
+    subgraph EXT["外部依赖"]
+        E1["config.ini 配置文件"]
+        E2["LLM 服务端（OpenAI 兼容 API）"]
+        E3["本地文件系统"]
+    end
+
+    E1 -.-> A3
+    A4 -.-> E2
+    C3 -.-> E2
+    T_FS -.-> E3
+
+    %% ================= 整体异常处理 =================
+    EXC["外层 try/except<br/>捕获异常并打印 Error"]
+    C3 -.-> EXC
+    C8 -.-> EXC

@@ -100,8 +100,9 @@ class LAgentApp(App):
                         self.call_from_thread(lambda w=w, c=current: w.update(f"[bold blue]LAgent[/]\n{c}"))
                     self.call_from_thread(self._scroll_bottom)
                 elif kind == "tool":
+                    # 工具结果里的 [xx] 会被 Textual 当成标记吞掉，先转义
                     self.call_from_thread(
-                        lambda n=ev["name"], r=ev["result"], t=ev["elapsed_ms"]:
+                        lambda n=ev["name"], r=ev["result"].replace("[", "\\["), t=ev["elapsed_ms"]:
                             self._chat.mount(Static(f"[dim]▶ 工具 {n} · {t:.0f} ms[/]\n{r}"))
                     )
                     self.call_from_thread(self._scroll_bottom)

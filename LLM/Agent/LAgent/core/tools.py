@@ -8,6 +8,11 @@ SYSTEM_PROMPT = (
     "涉及本地文件操作时：获取当前目录用getCwd；列出目录内容用listFiles；查看文件类型用getFileType；"
     "读取文件内容用readFile；创建新文件用createFile；编辑文件内容用editFile；创建目录用createDir；"
     "删除目录用deleteDir；删除文件用deleteFile；重命名文件或目录用renamePath。"
+    "用户需要联网搜索最新信息、新闻、资料时，调用searchWeb，传入query参数（搜索关键词或问题），"
+    "转述搜索摘要并附上参考来源的标题和URL。"
+    "用户需要查看某个网页的正文内容时，调用fetchWeb，传入url参数，如实转述返回的Markdown正文。"
+    "用户需要执行本地命令行程序时，调用RunCli，传入command（程序名）和args（参数列表），"
+    "如实报告stdout、stderr和退出码。"
     "禁止编造结果，必须调用工具。用户只问几点就只输出时分秒，问日期输出年月日。"
     "输出闰年结果时，展示：调用工具名称、工具返回结果、闰年判断依据。"
     "工具返回的内容要如实转述给用户。"
@@ -176,6 +181,53 @@ TOOLS = [
                     "new_name": {"type": "string", "description": "新名称，需带扩展名，例如 readme.md，不需要写路径"}
                 },
                 "required": ["path", "new_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "searchWeb",
+            "description": "联网搜索工具：调用百度千帆智能搜索生成API，获取互联网上的最新信息。返回搜索摘要以及参考来源的标题和URL。当用户的问题涉及最新资讯、新闻、实时数据、你不确定的近期事实等需要联网查询的内容时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词或问题，例如：2026年国庆假期安排"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetchWeb",
+            "description": "网页正文获取工具：通过本地curl下载指定网页的HTML源代码，再用trafilatura提取正文并转换为Markdown格式。返回Markdown正文及原始URL。当用户给出具体网页链接并希望阅读其内容时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "待获取的网页URL，需以 http:// 或 https:// 开头"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "RunCli",
+            "description": "本地命令行执行工具：调用本机已安装的任意命令行程序（CLI）并返回标准输出、标准错误和退出码。当用户要求执行某个本地命令（如 ipconfig、ping、python 等）时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "程序名称，例如 ipconfig、ping、python"},
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "参数列表，例如 [\"--version\"]，可为空"
+                    }
+                },
+                "required": ["command"]
             }
         }
     }

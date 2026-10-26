@@ -7,11 +7,24 @@ import os
 import shutil
 import subprocess
 
+import requests
+import trafilatura
+
+from core.config import load_search_settings
+
 TEXT_EXTS = {
     ".txt", ".md", ".py", ".json", ".csv", ".log", ".ini", ".cfg",
     ".html", ".css", ".js", ".xml", ".yaml", ".yml", ".bat", ".sh",
     ".java", ".c", ".cpp", ".h", ".sql", ".properties"
 }
+
+# 千帆智能搜索生成 API 地址与请求超时（秒）
+QIANFAN_SEARCH_URL = "https://qianfan.baidubce.com/v2/ai_search"
+SEARCH_TIMEOUT = 30
+# fetchWeb / RunCli 的通用限制
+FETCH_TIMEOUT = 25          # curl 下载网页超时
+CLI_TIMEOUT = 30            # 本地命令执行超时
+MAX_OUTPUT_CHARS = 4000     # 过长输出截断阈值
 
 
 def get_current_time() -> str:
@@ -166,6 +179,150 @@ def rename_path(path: str, new_name: str) -> str:
         return f"重命名失败：{e}"
 
 
+# ========== （一）searchWeb：百度千帆智能搜索生成 ==========
+def search_web(query: str) -> str:
+    """调用百度千帆智能搜索生成API，返回搜索摘要与参考来源（标题+URL）"""
+    key = (load_search_settings().get("baidu_qianfan_api_key") or "").strip()
+    if not key:
+        return ("错误：缺少配置。请在 config.ini 的 [search] 小节中填写 "
+                "baidu_qianfan_api_key（百度千帆 API Key）后重试")
+    payload = {
+        "messages": [{"role": "user", "content": query}],
+        "search_source": "baidu_search_v2",
+        "resource_type_filter": [{"type": "web", "top_k": 5}],
+    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+    try:
+        resp = requests.post(QIANFAN_SEARCH_URL, json=payload,
+                             headers=headers, timeout=SEARCH_TIMEOUT)
+    except requests.exceptions.Timeout:
+        return f"错误：搜索请求超时（{SEARCH_TIMEOUT} 秒），请稍后重试"
+    except requests.exceptions.RequestException as e:
+        return f"错误：网络请求失败 -> {e}"
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return f"错误：API 返回内容无法解析（HTTP {resp.status_code}）"
+
+    # API 层错误：兼容 {"error":{...}} 与 {"error_code":...,"error_msg":...} 两种结构
+    if resp.status_code != 200 or "error" in data or "error_code" in data:
+        err = data.get("error") if isinstance(data.get("error"), dict) else data
+        code = err.get("code", err.get("error_code", resp.status_code))
+        msg = err.get("message", err.get("error_msg", str(err)))
+        return f"错误：搜索API返回错误（{code}）->{msg}"
+
+    refs = data.get("references") or []
+    lines = []
+    answer = (data.get("answer") or "").strip()
+    if answer:
+        lines.append(f"【搜索摘要】{answer}")
+    if not refs:
+        if answer:
+            lines.append("【参考来源】无")
+            return "\n".join(lines)
+        return f"搜索完成：未找到与「{query}」相关的结果"
+    lines.append("【参考来源】")
+    for i, ref in enumerate(refs, 1):
+        title = (ref.get("title") or "无标题").strip()
+        url = (ref.get("url") or "").strip()
+        snippet = ((ref.get("content") or ref.get("snippet") or "").strip())
+        if len(snippet) > 150:
+            snippet = snippet[:150] + "..."
+        lines.append(f"{i}. {title}\n   {url}")
+        if snippet:
+            lines.append(f"   摘要：{snippet}")
+    return "\n".join(lines)
+
+
+# ========== （二）fetchWeb：curl 下载 + trafilatura 提取正文 ==========
+def fetch_web(url: str) -> str:
+    """用本地curl（参数列表方式，不用shell=True）下载网页，trafilatura 提取正文转 Markdown"""
+    if not url.lower().startswith(("http://", "https://")):
+        return f"错误：无效的URL -> {url}（需以 http:// 或 https:// 开头）"
+    try:
+        proc = subprocess.run(
+            ["curl", "-s", "-L", "--max-time", str(FETCH_TIMEOUT),
+             "-A", "Mozilla/5.0 (compatible; LAgent/1.0)", url],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            shell=False, timeout=FETCH_TIMEOUT + 5,
+        )
+    except subprocess.TimeoutExpired:
+        return f"错误：下载网页超时（{FETCH_TIMEOUT} 秒）-> {url}"
+    except FileNotFoundError:
+        return "错误：未找到本地 curl 程序，请确认系统已安装 curl"
+    except Exception as e:
+        return f"错误：调用 curl 失败 -> {e}"
+
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()[:200]
+        return f"错误：curl 访问失败（退出码 {proc.returncode}）->{err or url}"
+    html = proc.stdout or ""
+    if not html.strip():
+        return f"错误：网页内容为空 -> {url}"
+
+    try:
+        markdown = trafilatura.extract(
+            html, output_format="markdown",
+            include_links=True, include_tables=True,
+            include_images=False, favor_recall=True,
+        )
+    except Exception as e:
+        return f"错误：HTML 解析失败 -> {e}"
+    if not markdown or not markdown.strip():
+        return f"错误：无法从该网页提取正文 -> {url}"
+    text = markdown.strip()
+    if len(text) > MAX_OUTPUT_CHARS:
+        text = text[:MAX_OUTPUT_CHARS] + f"\n\n（正文过长，已截断：原文约 {len(markdown)} 字符）"
+    return f"【URL】{url}\n\n【正文 Markdown】\n{text}"
+
+
+# ========== （三）RunCli：执行本地命令行程序 ==========
+def _truncate(text: str, label: str) -> str:
+    """过长输出截断并标明截断情况"""
+    if len(text) > MAX_OUTPUT_CHARS:
+        return text[:MAX_OUTPUT_CHARS] + f"\n...（{label}过长，已截断：原文 {len(text)} 字符）"
+    return text
+
+
+def _decode_output(data: bytes) -> str:
+    """控制台输出解码：优先 UTF-8，失败退 GBK（中文 Windows 控制台默认编码）"""
+    if not data:
+        return ""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def run_cli(command: str, args: list) -> str:
+    """以参数列表 + shell=False 方式执行本地CLI，返回 stdout/stderr/退出码"""
+    if not command or not command.strip():
+        return "错误：command 不能为空"
+    cmd_list = [command.strip()] + [str(a) for a in (args or [])]
+    try:
+        proc = subprocess.run(
+            cmd_list, capture_output=True,
+            shell=False, timeout=CLI_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return f"错误：命令执行超时（{CLI_TIMEOUT} 秒）-> {' '.join(cmd_list)}"
+    except FileNotFoundError:
+        return f"错误：未找到程序 {command}，请确认已安装并加入 PATH"
+    except OSError as e:
+        return f"错误：执行失败 -> {e}"
+
+    stdout = _truncate(_decode_output(proc.stdout).strip() or "（无输出）", "标准输出")
+    stderr = _truncate(_decode_output(proc.stderr).strip() or "（无）", "标准错误")
+    status = "成功" if proc.returncode == 0 else "失败"
+    return (f"命令：{' '.join(cmd_list)}\n"
+            f"退出码：{proc.returncode}（{status}）\n"
+            f"【stdout】\n{stdout}\n"
+            f"【stderr】\n{stderr}")
+
+
 # ========== 统一分发：工具名 -> (函数, 参数组装) ==========
 def dispatch(name: str, args: dict) -> str:
     """根据工具名和参数调用对应实现，返回工具结果字符串"""
@@ -182,6 +339,9 @@ def dispatch(name: str, args: dict) -> str:
         "deleteDir": lambda: delete_dir(args["path"]),
         "deleteFile": lambda: delete_file(args["path"]),
         "renamePath": lambda: rename_path(args["path"], args["new_name"]),
+        "searchWeb": lambda: search_web(args["query"]),
+        "fetchWeb": lambda: fetch_web(args["url"]),
+        "RunCli": lambda: run_cli(args["command"], args.get("args", [])),
     }
     handler = handlers.get(name)
     if handler is None:

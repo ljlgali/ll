@@ -16,6 +16,15 @@ def load_settings() -> dict:
     return dict(cfg["llm"])
 
 
+def load_search_settings() -> dict:
+    """读取 [search] 配置（千帆 API Key 等），小节不存在则返回空 dict"""
+    cfg = configparser.ConfigParser()
+    cfg.read(CONFIG_PATH, encoding="utf-8")
+    if cfg.has_section("search"):
+        return dict(cfg["search"])
+    return {}
+
+
 def create_client() -> tuple[OpenAI, str]:
     """创建 OpenAI 客户端，返回 (client, model)"""
     s = load_settings()

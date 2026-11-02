@@ -7,8 +7,10 @@ import time
 import uuid
 
 from core.config import create_client
-from core.functions import dispatch
-from core.tools import SYSTEM_PROMPT, TOOLS
+from core.functions import dispatch, register_skills, register_mcp
+from core.mcp_client import MCPManager
+from core.skills import discover_skills
+from core.tools import build_system_prompt, TOOLS
 
 
 class Agent:
@@ -18,8 +20,16 @@ class Agent:
         self.client, self.model = create_client()
         self.base_url = self.client.base_url
         self.cancel_flag = False          # 供 UI 层设置，Esc 中断生成用
+        # —— Skill 发现：初始化时扫描一次，只加载 name / description ——
+        self.discovered_skills = discover_skills()
+        register_skills(self.discovered_skills)
+        # —— MCP Server 连接：读取 .mcp.json，连接并动态注册 MCP 工具 ——
+        self.mcp = MCPManager()
+        self.mcp.start()
+        register_mcp(self.mcp)
+        system_prompt = build_system_prompt(self.discovered_skills, self.mcp)
         self._reset_stats()
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [{"role": "system", "content": system_prompt}]
 
     # ===== 会话统计（TUI 右侧栏直接读） =====
     def _reset_stats(self):
@@ -39,12 +49,20 @@ class Agent:
 
     @property
     def registered_tools(self) -> list:
-        return TOOLS
+        """当前全部工具：本地工具 + 动态注册的 MCP 工具"""
+        return TOOLS + self.mcp.schemas
+
+    @property
+    def mcp_tools(self) -> list:
+        return self.mcp.schemas
 
     # ===== 会话控制 =====
     def reset(self):
-        """/new 命令：重建会话，保留同一个 Agent 实例"""
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        """/new 命令：重建会话，保留同一个 Agent 实例（MCP 连接常驻，无需重连）"""
+        self.discovered_skills = discover_skills()
+        register_skills(self.discovered_skills)
+        system_prompt = build_system_prompt(self.discovered_skills, self.mcp)
+        self.messages = [{"role": "system", "content": system_prompt}]
         self.cancel_flag = False
         self._reset_stats()
 
@@ -60,6 +78,8 @@ class Agent:
         """
         self.round_count += 1
         self.cancel_flag = False
+        # 每轮都带上完整工具集（本地工具 + MCP 工具），模型才能正常发起工具调用
+        all_tools = TOOLS + self.mcp.schemas
         try:
             self.messages.append({"role": "user", "content": user_input})
             while True:
@@ -67,7 +87,7 @@ class Agent:
                 stream = self.client.chat.completions.create(
                     model=self.model,
                     messages=self.messages,
-                    tools=TOOLS,
+                    tools=all_tools,
                     tool_choice="auto",
                     stream=True,
                 )

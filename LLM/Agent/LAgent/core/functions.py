@@ -11,6 +11,7 @@ import requests
 import trafilatura
 
 from core.config import load_search_settings
+from core.skills import load_skill as _load_skill
 
 TEXT_EXTS = {
     ".txt", ".md", ".py", ".json", ".csv", ".log", ".ini", ".cfg",
@@ -25,6 +26,26 @@ SEARCH_TIMEOUT = 30
 FETCH_TIMEOUT = 25          # curl 下载网页超时
 CLI_TIMEOUT = 30            # 本地命令执行超时
 MAX_OUTPUT_CHARS = 4000     # 过长输出截断阈值
+
+# Skill 注册表：由 Agent 初始化时通过 register_skills() 注入，
+# loadSkill 工具据此匹配 Skill 并读取其正文/附件
+_DISCOVERED_SKILLS = []
+
+# MCP 管理器：由 Agent 连接成功后通过 register_mcp() 注入
+_MCP_MANAGER = None
+
+
+def register_skills(skills: list) -> None:
+    """Agent 初始化发现 Skill 后调用，注入到 functions 层"""
+    global _DISCOVERED_SKILLS
+    _DISCOVERED_SKILLS = skills or []
+
+
+def register_mcp(mcp) -> None:
+    """Agent 连接 MCP Server 后调用，注入 MCPManager；
+    之后 MCP 工具与本地工具一样统一走 dispatch 分发"""
+    global _MCP_MANAGER
+    _MCP_MANAGER = mcp
 
 
 def get_current_time() -> str:
@@ -326,6 +347,10 @@ def run_cli(command: str, args: list) -> str:
 # ========== 统一分发：工具名 -> (函数, 参数组装) ==========
 def dispatch(name: str, args: dict) -> str:
     """根据工具名和参数调用对应实现，返回工具结果字符串"""
+    # MCP 工具优先按映射转发到对应 Server（与本地工具共用同一分发入口）
+    if _MCP_MANAGER is not None and _MCP_MANAGER.has_tool(name):
+        return _MCP_MANAGER.call_tool(name, args)
+
     handlers = {
         "getDate": lambda: get_current_time(),
         "isLeapYear": lambda: is_leap_year(args["year"]),
@@ -342,6 +367,11 @@ def dispatch(name: str, args: dict) -> str:
         "searchWeb": lambda: search_web(args["query"]),
         "fetchWeb": lambda: fetch_web(args["url"]),
         "RunCli": lambda: run_cli(args["command"], args.get("args", [])),
+        "loadSkill": lambda: _load_skill(
+            _DISCOVERED_SKILLS,
+            args["name"],
+            args.get("filename"),
+        ),
     }
     handler = handlers.get(name)
     if handler is None:

@@ -1,22 +1,47 @@
 # core/tools.py —— 工具声明层
 # 只放"给模型看的"工具 JSON Schema 与 system 提示词，不含任何实现逻辑
 
-SYSTEM_PROMPT = (
-    "你是一个Agent。只要用户的问题涉及时间、日期、几点、几号、现在时刻等和实时时间相关的内容，"
-    "都必须调用getDate工具获取本机最新时间，禁止使用记忆里的旧时间。"
-    "用户询问某一年是否是闰年，调用isLeapYear，传入year参数。"
-    "涉及本地文件操作时：获取当前目录用getCwd；列出目录内容用listFiles；查看文件类型用getFileType；"
-    "读取文件内容用readFile；创建新文件用createFile；编辑文件内容用editFile；创建目录用createDir；"
-    "删除目录用deleteDir；删除文件用deleteFile；重命名文件或目录用renamePath。"
-    "用户需要联网搜索最新信息、新闻、资料时，调用searchWeb，传入query参数（搜索关键词或问题），"
-    "转述搜索摘要并附上参考来源的标题和URL。"
-    "用户需要查看某个网页的正文内容时，调用fetchWeb，传入url参数，如实转述返回的Markdown正文。"
-    "用户需要执行本地命令行程序时，调用RunCli，传入command（程序名）和args（参数列表），"
-    "如实报告stdout、stderr和退出码。"
-    "禁止编造结果，必须调用工具。用户只问几点就只输出时分秒，问日期输出年月日。"
-    "输出闰年结果时，展示：调用工具名称、工具返回结果、闰年判断依据。"
-    "工具返回的内容要如实转述给用户。"
-)
+def build_system_prompt(skills: list | None = None, mcp=None) -> str:
+    """根据已发现的 Skill 与已连接的 MCP Server 动态拼装 system prompt。
+    skills 为空时省略"可用技能"段落；mcp 没有可用工具时省略 MCP 段落。
+    """
+    base = (
+        "你是一个Agent。只要用户的问题涉及时间、日期、几点、几号、现在时刻等和实时时间相关的内容，"
+        "都必须调用getDate工具获取本机最新时间，禁止使用记忆里的旧时间。"
+        "用户询问某一年是否是闰年，调用isLeapYear，传入year参数。"
+        "涉及本地文件操作时：获取当前目录用getCwd；列出目录内容用listFiles；查看文件类型用getFileType；"
+        "读取文件内容用readFile；创建新文件用createFile；编辑文件内容用editFile；创建目录用createDir；"
+        "删除目录用deleteDir；删除文件用deleteFile；重命名文件或目录用renamePath。"
+        "用户需要联网搜索最新信息、新闻、资料时，调用searchWeb，传入query参数（搜索关键词或问题），"
+        "转述搜索摘要并附上参考来源的标题和URL。"
+        "用户需要查看某个网页的正文内容时，调用fetchWeb，传入url参数，如实转述返回的Markdown正文。"
+        "用户需要执行本地命令行程序时，调用RunCli，传入command（程序名）和args（参数列表），"
+        "如实报告stdout、stderr和退出码。"
+        "禁止编造结果，必须调用工具。用户只问几点就只输出时分秒，问日期输出年月日。"
+        "输出闰年结果时，展示：调用工具名称、工具返回结果、闰年判断依据。"
+        "工具返回的内容要如实转述给用户。"
+    )
+    if skills:
+        skill_lines = ["\n\n"
+                       "You have access to the following skills（可用技能）："]
+        for s in skills:
+            skill_lines.append(f"- `{s['name']}`: {s['description']}")
+        skill_lines.append(
+            "\n当用户的问题与某个技能相关，或你需要额外指令时，"
+            "调用loadSkill工具传入name参数加载完整技能内容。"
+            "如需读取技能目录下的附件文件，再传入filename参数。"
+            "Skill 的完整内容只有在调用 loadSkill 时才会进入对话上下文，"
+            "请先加载再根据内容行动。"
+        )
+        base += "".join(skill_lines)
+    if mcp is not None:
+        # 已连接的 MCP Server 工具说明（由 MCPManager 生成，无工具时返回空串）
+        base += mcp.prompt_block()
+    return base
+
+
+# 保留旧常量作为后备（不发现 skills 时使用）
+SYSTEM_PROMPT = build_system_prompt()
 
 TOOLS = [
     {
@@ -228,6 +253,21 @@ TOOLS = [
                     }
                 },
                 "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "loadSkill",
+            "description": "动态加载 Skill（技能）的完整内容。Skill 是放在 .agents/skills/ 目录下的可复用指令包，每个 Skill 子目录至少有一个 SKILL.md（YAML Frontmatter 声明 name 和 description）。调用 loadSkill 后，Skill 的正文才会进入对话上下文，避免一次性塞入所有 Skill 造成 token 浪费。只传 name 时加载 SKILL.md 正文；同时传 filename 时加载 Skill 目录下对应的附件文件（不再重复加载 SKILL.md）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "必需，Skill 的名称（YAML Frontmatter 里的 name 字段，或 Skill 目录名）"},
+                    "filename": {"type": "string", "description": "可选，需要加载的附件文件名。不填时加载 SKILL.md 全文；填写时加载 Skill 目录内的该文件（支持 Skill 目录相对路径）"}
+                },
+                "required": ["name"]
             }
         }
     }

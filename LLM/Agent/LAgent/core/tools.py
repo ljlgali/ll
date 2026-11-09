@@ -4,32 +4,46 @@
 def build_system_prompt(skills: list | None = None, mcp=None) -> str:
     """根据已发现的 Skill 与已连接的 MCP Server 动态拼装 system prompt。
     skills 为空时省略"可用技能"段落；mcp 没有可用工具时省略 MCP 段落。
+    同时注入 recallContext 工具的说明，让模型知道如何检索被压缩的历史。
     """
     base = (
-        "你是一个Agent。只要用户的问题涉及时间、日期、几点、几号、现在时刻等和实时时间相关的内容，"
-        "都必须调用getDate工具获取本机最新时间，禁止使用记忆里的旧时间。"
-        "用户询问某一年是否是闰年，调用isLeapYear，传入year参数。"
-        "涉及本地文件操作时：获取当前目录用getCwd；列出目录内容用listFiles；查看文件类型用getFileType；"
-        "读取文件内容用readFile；创建新文件用createFile；编辑文件内容用editFile；创建目录用createDir；"
-        "删除目录用deleteDir；删除文件用deleteFile；重命名文件或目录用renamePath。"
-        "用户需要联网搜索最新信息、新闻、资料时，调用searchWeb，传入query参数（搜索关键词或问题），"
-        "转述搜索摘要并附上参考来源的标题和URL。"
-        "用户需要查看某个网页的正文内容时，调用fetchWeb，传入url参数，如实转述返回的Markdown正文。"
-        "用户需要执行本地命令行程序时，调用RunCli，传入command（程序名）和args（参数列表），"
-        "如实报告stdout、stderr和退出码。"
-        "禁止编造结果，必须调用工具。用户只问几点就只输出时分秒，问日期输出年月日。"
-        "输出闰年结果时，展示：调用工具名称、工具返回结果、闰年判断依据。"
-        "工具返回的内容要如实转述给用户。"
+        "你是一名通用 AI 助手，名叫「xAgent」。你可以帮用户回答问题、编写代码、操作文件、执行命令、联网搜索，"
+        "回答要准确、务实、可操作，必要时追问关键信息。\n\n"
+        "**回答原则：**\n"
+        "- 优先给出可直接执行的建议，用具体步骤或数字说话\n"
+        "- 用户需求不明确时，主动追问关键信息\n"
+        "- 严禁编造数据或结论，所有专业判断必须有依据（工具返回、已加载 Skill、联网搜索结果）\n\n"
+        "**时间与日期工具：**\n"
+        "只要用户的问题涉及时间、日期、几点、几号、现在时刻等，"
+        "都必须调用 getDate 工具获取本机最新时间，禁止使用记忆里的旧时间。"
+        "用户询问某一年是否是闰年，调用 isLeapYear，传入 year 参数。\n\n"
+        "**文件操作：**\n"
+        "获取当前目录用 getCwd；列出目录内容用 listFiles；查看文件类型用 getFileType；"
+        "读取文件内容用 readFile；创建新文件用 createFile；编辑文件内容用 editFile；创建目录用 createDir；"
+        "删除目录用 deleteDir；删除文件用 deleteFile；重命名文件或目录用 renamePath。\n\n"
+        "**联网检索：**\n"
+        "需要查询最新信息（新闻、政策、天气、技术文档、产品信息等）时，"
+        "调用 searchWeb，传入 query 参数，转述摘要并附上参考来源标题和 URL。"
+        "需要读取某个网页的正文时，调用 fetchWeb，传入 url 参数。\n\n"
+        "**命令执行：**\n"
+        "需要在本地执行计算、脚本或命令行程序时，调用 RunCli，传入 command 和 args。\n\n"
+        "**严禁编造数据或结论**，所有专业判断必须有依据（工具返回、已加载 Skill、联网搜索结果）。"
+        "\n\n"
+        "**上下文压缩与历史检索：**\n"
+        "当你发现历史对话被压缩，或需要查找被压缩前的历史细节时，调用 recallContext 工具。"
+        "它接收 text（必需，关键词）和 id（可选，归档编号）两个参数，"
+        "返回包含关键词的原始消息片段及其所在归档编号和位置。"
+        "归档编号可从压缩摘要末尾的归档说明中获得。"
     )
     if skills:
         skill_lines = ["\n\n"
-                       "You have access to the following skills（可用技能）："]
+                       "你可以调用以下技能（Skill），每个 Skill 是一份可复用的专业指令包："]
         for s in skills:
             skill_lines.append(f"- `{s['name']}`: {s['description']}")
         skill_lines.append(
-            "\n当用户的问题与某个技能相关，或你需要额外指令时，"
-            "调用loadSkill工具传入name参数加载完整技能内容。"
-            "如需读取技能目录下的附件文件，再传入filename参数。"
+            "\n当用户的问题与某个技能相关，或你需要额外的专业指令时，"
+            "调用 loadSkill 工具传入 name 参数加载完整技能内容。"
+            "如需读取技能目录下的附件文件（如数据表、模板），再传入 filename 参数。"
             "Skill 的完整内容只有在调用 loadSkill 时才会进入对话上下文，"
             "请先加载再根据内容行动。"
         )
@@ -48,7 +62,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "getDate",
-            "description": "获取本机当前的日期和时间。只要用户的问题涉及时间、日期、几点、几号、多久之后、现在时刻、倒计时、对比时间等一切和实时时间相关的内容，你都必须调用这个工具获取最新时间，禁止使用记忆里的旧时间。",
+            "description": "获取本机当前的日期和时间。只要用户的问题涉及时间、日期、几点、几号、多久之后、现在时刻、倒计时、节气、农时、播种期、收获期等一切和实时时间相关的内容，你都必须调用这个工具获取最新时间，禁止使用记忆里的旧时间。",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -70,7 +84,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "getCwd",
-            "description": "获取当前工作目录的绝对路径。用户问“当前目录/工作目录/在哪个目录”时调用。",
+            "description": "获取当前工作目录的绝对路径。用户问'当前目录/工作目录/在哪个目录'时调用。",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -82,7 +96,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "目标目录的绝对路径，例如 E:\\LLM\\LLM\\Agent\\XAgent"}
+                    "path": {"type": "string", "description": "目标目录的绝对路径"}
                 },
                 "required": ["path"]
             }
@@ -96,7 +110,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "文件的绝对路径，例如 E:\\LLM\\LLM\\Agent\\XAgent\\config.ini"}
+                    "path": {"type": "string", "description": "文件的绝对路径"}
                 },
                 "required": ["path"]
             }
@@ -125,7 +139,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "dir": {"type": "string", "description": "新文件所在目录的绝对路径"},
-                    "filename": {"type": "string", "description": "新文件名，需带扩展名，例如 note.txt"},
+                    "filename": {"type": "string", "description": "新文件名，需带扩展名，例如 report.csv"},
                     "content": {"type": "string", "description": "新文件的初始内容，可为空"}
                 },
                 "required": ["dir", "filename"]
@@ -203,7 +217,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "原文件或目录的绝对路径"},
-                    "new_name": {"type": "string", "description": "新名称，需带扩展名，例如 readme.md，不需要写路径"}
+                    "new_name": {"type": "string", "description": "新名称，需带扩展名，例如 春耕计划2026.md，不需要写路径"}
                 },
                 "required": ["path", "new_name"]
             }
@@ -213,11 +227,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "searchWeb",
-            "description": "联网搜索工具：调用百度千帆智能搜索生成API，获取互联网上的最新信息。返回搜索摘要以及参考来源的标题和URL。当用户的问题涉及最新资讯、新闻、实时数据、你不确定的近期事实等需要联网查询的内容时调用。",
+            "description": "联网搜索工具：获取互联网上的最新信息。当用户需要查询新闻、政策、天气、技术文档、产品信息等需要联网的内容时调用。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "搜索关键词或问题，例如：2026年国庆假期安排"}
+                    "query": {"type": "string", "description": "搜索关键词或问题，例如：2026年小麦赤霉病发生趋势预报"}
                 },
                 "required": ["query"]
             }
@@ -227,7 +241,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "fetchWeb",
-            "description": "网页正文获取工具：通过本地curl下载指定网页的HTML源代码，再用trafilatura提取正文并转换为Markdown格式。返回Markdown正文及原始URL。当用户给出具体网页链接并希望阅读其内容时调用。",
+            "description": "网页正文获取工具：通过本地curl下载指定网页的HTML源代码，再用trafilatura提取正文并转换为Markdown格式。当用户给出具体网页链接并希望阅读其内容时调用。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -241,15 +255,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "RunCli",
-            "description": "本地命令行执行工具：调用本机已安装的任意命令行程序（CLI）并返回标准输出、标准错误和退出码。当用户要求执行某个本地命令（如 ipconfig、ping、python 等）时调用。",
+            "description": "本地命令行执行工具：调用本机已安装的任意命令行程序（CLI）并返回标准输出、标准错误和退出码。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "程序名称，例如 ipconfig、ping、python"},
+                    "command": {"type": "string", "description": "程序名称"},
                     "args": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "参数列表，例如 [\"--version\"]，可为空"
+                        "description": "参数列表，可为空"
                     }
                 },
                 "required": ["command"]
@@ -260,14 +274,29 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "loadSkill",
-            "description": "动态加载 Skill（技能）的完整内容。Skill 是放在 .agents/skills/ 目录下的可复用指令包，每个 Skill 子目录至少有一个 SKILL.md（YAML Frontmatter 声明 name 和 description）。调用 loadSkill 后，Skill 的正文才会进入对话上下文，避免一次性塞入所有 Skill 造成 token 浪费。只传 name 时加载 SKILL.md 正文；同时传 filename 时加载 Skill 目录下对应的附件文件（不再重复加载 SKILL.md）。",
+            "description": "动态加载 Skill（技能）的完整内容。Skill 是放在 .agents/skills/ 目录下的可复用专业指令包，每个 Skill 子目录至少有一个 SKILL.md（YAML Frontmatter 声明 name 和 description）。调用 loadSkill 后，Skill 的正文才会进入对话上下文，避免一次性塞入所有 Skill 造成 token 浪费。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "必需，Skill 的名称（YAML Frontmatter 里的 name 字段，或 Skill 目录名）"},
-                    "filename": {"type": "string", "description": "可选，需要加载的附件文件名。不填时加载 SKILL.md 全文；填写时加载 Skill 目录内的该文件（支持 Skill 目录相对路径）"}
+                    "filename": {"type": "string", "description": "可选，需要加载的附件文件名。不填时加载 SKILL.md 全文；填写时加载 Skill 目录内的该文件"}
                 },
                 "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recallContext",
+            "description": "在历史压缩归档中检索包含指定关键词的原始消息片段。当你发现上下文被压缩、需要查找被压缩前的历史细节时调用此工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "必需，要查找的关键词或短语"},
+                    "id": {"type": "string", "description": "可选，归档编号（形如 20261022-153000），不填则检索全部"}
+                },
+                "required": ["text"]
             }
         }
     }

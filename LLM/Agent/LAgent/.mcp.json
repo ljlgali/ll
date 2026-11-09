@@ -3,6 +3,10 @@
     "Bazi-MCP": {
       "type": "streamable_http",
       "url": "https://mcp.api-inference.modelscope.net/de67d58002ea4c/mcp"
+    },
+    "Pet-Hospital": {
+      "type": "streamable_http",
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }

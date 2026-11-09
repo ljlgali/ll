@@ -31,7 +31,7 @@ from mcp.client.streamable_http import streamable_http_client
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONNECT_TIMEOUT = 10       # 建立连接 + 发现工具的整体超时（秒）
 CALL_TIMEOUT = 30          # 单次 MCP 工具调用超时（秒）
-MAX_OUTPUT_CHARS = 4000    # 工具结果过长截断阈值
+MAX_OUTPUT_CHARS = 8000   # 工具结果过长截断阈值（MCP 返回常含结构化数据，留足空间）
 
 # 支持的类型（.mcp.json 里的 type 字段，仅 Streamable HTTP）
 STREAMABLE_HTTP_TYPES = {"streamable_http", "streamablehttp", "http"}
@@ -81,11 +81,46 @@ def _sanitize(name: str) -> str:
     return (cleaned or "mcp")[:64]
 
 
+def _inline_refs(node, defs: dict, depth: int = 0):
+    """把 JSON Schema 里的 $ref 就地展开成 $defs 定义，
+    并去掉 LLM 用不上的字段（title / default:null / $defs 等）。
+    Pydantic 生成的 schema 大量使用 $ref，直接塞给模型容易解析失败。"""
+    if depth > 6:            # 防御循环引用
+        return node
+    if isinstance(node, list):
+        return [_inline_refs(i, defs, depth + 1) for i in node]
+    if not isinstance(node, dict):
+        return node
+
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        target = defs.get(ref.split("/")[-1])
+        if isinstance(target, dict):
+            merged = _inline_refs(target, defs, depth + 1)
+            # $ref 同级可能带 description 等覆盖字段
+            for k, v in node.items():
+                if k != "$ref":
+                    merged.setdefault(k, v)
+            return merged
+
+    cleaned = {}
+    for k, v in node.items():
+        if k in ("$defs", "$schema", "title", "additionalProperties"):
+            continue
+        if k == "default" and v is None:
+            continue
+        cleaned[k] = _inline_refs(v, defs, depth + 1)
+    return cleaned
+
+
 def _clean_schema(schema: dict | None) -> dict:
     """清洗 MCP 的 inputSchema，转成 OpenAI 能接受的 parameters"""
     if not isinstance(schema, dict) or not schema:
         return {"type": "object", "properties": {}}
-    params = {k: v for k, v in schema.items() if k not in ("$schema", "additionalProperties")}
+    defs = schema.get("$defs") or {}
+    params = _inline_refs(schema, defs)
+    if not isinstance(params, dict):
+        return {"type": "object", "properties": {}}
     params.setdefault("type", "object")
     params.setdefault("properties", {})
     return params
@@ -122,10 +157,19 @@ def _format_result(res) -> str:
             parts.append(str(block))
 
     text = "\n".join(parts).strip()
+    text_is_json = False
+    # 纯 JSON 文本去掉缩进空白，减少冗余 token（内容不变，模型同样可读）
+    if text.startswith(("{", "[")):
+        try:
+            text = json.dumps(json.loads(text), ensure_ascii=False, separators=(",", ":"))
+            text_is_json = True
+        except Exception:
+            pass
     structured = (getattr(res, "structured_content", None)
                   or getattr(res, "structuredContent", None))
-    if structured:
-        text += "\n【结构化数据】\n" + json.dumps(structured, ensure_ascii=False, indent=2)
+    # 文本块已经就是同一份 JSON 时，不再重复追加结构化数据
+    if structured and not text_is_json:
+        text += "\n【结构化数据】\n" + json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
     if not text:
         text = "（MCP 工具无返回内容）"
     if getattr(res, "is_error", None) or getattr(res, "isError", None):

@@ -11,6 +11,7 @@ import requests
 import trafilatura
 
 from core.config import load_search_settings
+from core.context import recall_context as _recall_context
 from core.skills import load_skill as _load_skill
 
 TEXT_EXTS = {
@@ -200,60 +201,80 @@ def rename_path(path: str, new_name: str) -> str:
         return f"重命名失败：{e}"
 
 
-# ========== （一）searchWeb：百度千帆智能搜索生成 ==========
+# ========== （一）searchWeb：DeepSeek 内置 DFSR 联网搜索（免费） ==========
 def search_web(query: str) -> str:
-    """调用百度千帆智能搜索生成API，返回搜索摘要与参考来源（标题+URL）"""
+    """联网搜索。优先用 deepseek-chat 内置 DFSR 联网搜索（已有 Key，免费），
+    如果 DFSR 不可用则回退到千帆（需要单独配置 Key），再不行给降级提示。"""
+    from core.config import create_client, load_settings
+
+    # —— 方案 1：DeepSeek 内置 DFSR（推荐，免费，不需要额外 Key）——
+    try:
+        client, model_name = create_client()
+        resp = client.responses.create(
+            model=model_name,
+            input=[
+                {"role": "system", "content": (
+                    "你是联网搜索助手。使用内置联网搜索能力回答用户问题。"
+                    "回答要简明，附上参考来源标题和 URL。"
+                )},
+                {"role": "user", "content": f"搜索：{query}"},
+            ],
+            tools=[{"type": "web_search", "web_search": {"enable": True}}],
+        )
+        # responses API：output_text 包含了模型最终回答
+        text = resp.output_text or ""
+        if text.strip():
+            return f"【DFSR 联网搜索】\n{text.strip()}"
+    except Exception as e:
+        # DFSR 失败，记日志但不终止
+        _dfs_err = str(e)
+    else:
+        _dfs_err = None
+
+    # —— 方案 2：千帆（备用，需要单独配置 Key）——
     key = (load_search_settings().get("baidu_qianfan_api_key") or "").strip()
-    if not key:
-        return ("错误：缺少配置。请在 config.ini 的 [search] 小节中填写 "
-                "baidu_qianfan_api_key（百度千帆 API Key）后重试")
-    payload = {
-        "messages": [{"role": "user", "content": query}],
-        "search_source": "baidu_search_v2",
-        "resource_type_filter": [{"type": "web", "top_k": 5}],
-    }
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
-    try:
-        resp = requests.post(QIANFAN_SEARCH_URL, json=payload,
-                             headers=headers, timeout=SEARCH_TIMEOUT)
-    except requests.exceptions.Timeout:
-        return f"错误：搜索请求超时（{SEARCH_TIMEOUT} 秒），请稍后重试"
-    except requests.exceptions.RequestException as e:
-        return f"错误：网络请求失败 -> {e}"
+    if key and "your-qianfan-api-key" not in key.lower():
+        return _search_web_qianfan(query, key)
 
+    # —— 都不行：降级提示 ——
+    hint = ""
+    if _dfs_err:
+        hint = f"（DFSR 错误：{_dfs_err[:80]}）"
+    return (
+        f"⚠ 联网搜索暂不可用{hint}\n"
+        f"请用自身知识回答「{query}」，如涉及实时数据（今日天气、最新政策、实时行情）"
+        f"请明确告知用户无法获取，并给出权威来源让用户自行查询。"
+    )
+
+
+def _search_web_qianfan(query: str, key: str) -> str:
+    """千帆搜索（备用路径）"""
+    from core.agent import QIANFAN_SEARCH_URL, SEARCH_TIMEOUT
     try:
+        payload = {
+            "messages": [{"role": "user", "content": query}],
+            "search_source": "baidu_search_v2",
+            "resource_type_filter": [{"type": "web", "top_k": 5}],
+        }
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+        resp = requests.post(QIANFAN_SEARCH_URL, json=payload, headers=headers, timeout=SEARCH_TIMEOUT)
         data = resp.json()
-    except ValueError:
-        return f"错误：API 返回内容无法解析（HTTP {resp.status_code}）"
-
-    # API 层错误：兼容 {"error":{...}} 与 {"error_code":...,"error_msg":...} 两种结构
-    if resp.status_code != 200 or "error" in data or "error_code" in data:
-        err = data.get("error") if isinstance(data.get("error"), dict) else data
-        code = err.get("code", err.get("error_code", resp.status_code))
-        msg = err.get("message", err.get("error_msg", str(err)))
-        return f"错误：搜索API返回错误（{code}）->{msg}"
-
-    refs = data.get("references") or []
-    lines = []
-    answer = (data.get("answer") or "").strip()
-    if answer:
-        lines.append(f"【搜索摘要】{answer}")
-    if not refs:
+        if resp.status_code != 200 or "error" in data or "error_code" in data:
+            return "⚠ 千帆暂时不可用，请用自身知识回答。"
+        refs = data.get("references") or []
+        answer = (data.get("answer") or "").strip()
+        lines = []
         if answer:
-            lines.append("【参考来源】无")
-            return "\n".join(lines)
-        return f"搜索完成：未找到与「{query}」相关的结果"
-    lines.append("【参考来源】")
-    for i, ref in enumerate(refs, 1):
-        title = (ref.get("title") or "无标题").strip()
-        url = (ref.get("url") or "").strip()
-        snippet = ((ref.get("content") or ref.get("snippet") or "").strip())
-        if len(snippet) > 150:
-            snippet = snippet[:150] + "..."
-        lines.append(f"{i}. {title}\n   {url}")
-        if snippet:
-            lines.append(f"   摘要：{snippet}")
-    return "\n".join(lines)
+            lines.append(f"【搜索摘要】{answer}")
+        if refs:
+            lines.append("【参考来源】")
+            for i, ref in enumerate(refs, 1):
+                title = (ref.get("title") or "无标题").strip()
+                url = (ref.get("url") or "").strip()
+                lines.append(f"{i}. {title}\n   {url}")
+        return "\n".join(lines) if lines else f"搜索完成：未找到与「{query}」相关的结果"
+    except Exception:
+        return "⚠ 千帆搜索暂时不可用，请用自身知识回答。"
 
 
 # ========== （二）fetchWeb：curl 下载 + trafilatura 提取正文 ==========
@@ -371,6 +392,10 @@ def dispatch(name: str, args: dict) -> str:
             _DISCOVERED_SKILLS,
             args["name"],
             args.get("filename"),
+        ),
+        "recallContext": lambda: _recall_context(
+            args.get("text", ""),
+            args.get("id"),
         ),
     }
     handler = handlers.get(name)

@@ -1,0 +1,10 @@
+# 含真实 API Key，禁止上传
+config.ini
+
+# 运行时生成的本地数据
+.agents/sessions/
+.agents/context/
+
+# Python 缓存
+__pycache__/
+*.pyc

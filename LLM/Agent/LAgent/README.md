@@ -80,6 +80,8 @@ D:\东软软件\课堂python\.venv\Scripts\python.exe main.py
 | fetchWeb | 抓取网页正文为 Markdown（参数 `url`） |
 | RunCli | 执行本地命令行程序（`command` + `args`） |
 | loadSkill | 加载 Skill 正文或附件（`name` 必填，`filename` 可选） |
+| createSkill | 新建 Skill（`name` + `description` + `body`，落盘为 `.agents/skills/<name>/SKILL.md`，拒绝覆盖） |
+| recallContext | 在被压缩的历史归档中按关键词检索（`text` 必填，`id` 可选） |
 
 工具结果超过 4000 字符会截断并标注原始长度。
 
@@ -137,7 +139,11 @@ description: 将会议记录整理成结构规范的会议纪要。触发词：�
 
 | 命令 | 作用 |
 |---|---|
-| `/new`、`/reset`、`/clear` | 重置会话（重新发现 Skill，MCP 连接保持不变） |
+| `/new`、`/reset`、`/clear` | 重置会话（自动保存当前会话 + 重新发现 Skill，MCP 连接保持不变，AGENTS.md 重新注入） |
+| `/save` | 手动保存当前会话到 `.agents/sessions/` |
+| `/sessions`、`/ls` | 列出所有已保存会话 |
+| `/resume <id>` | 恢复历史会话（不带 id 时弹出选择面板） |
+| `/compact` | 手动触发上下文压缩（旧历史归档为 JSONL，LLM 生成摘要替换） |
 | `/skills` | 列出已发现的 Skill |
 | `/mcp` | 查看 MCP Server 连接状态与已注册工具 |
 | `/help`、`/?` | 帮助 |

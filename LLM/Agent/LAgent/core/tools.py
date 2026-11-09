@@ -288,6 +288,22 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "createSkill",
+            "description": "在 .agents/skills/ 下新建一个 Skill（落盘为目录 + SKILL.md，含 YAML frontmatter）。当用户希望把一套可复用的专业指令、流程、领域知识沉淀成以后能反复调用的技能时使用。会校验命名合法性、拒绝覆盖已有 Skill。新 Skill 创建后需 /new 或重启才会被自动发现。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "必需，Skill 名：2-40 字符，只能含小写字母、数字、连字符、下划线，首尾为字母或数字，例如 wheat-disease"},
+                    "description": {"type": "string", "description": "必需，一句话说明这个 Skill 是干什么的、什么时候触发，会注入 System Prompt 让模型判断是否加载，建议 ≤200 字"},
+                    "body": {"type": "string", "description": "必需，Skill 正文 Markdown：执行步骤、规则、参考资料、示例。≤20000 字"}
+                },
+                "required": ["name", "description", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "recallContext",
             "description": "在历史压缩归档中检索包含指定关键词的原始消息片段。当你发现上下文被压缩、需要查找被压缩前的历史细节时调用此工具。",
             "parameters": {

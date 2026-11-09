@@ -228,3 +228,67 @@ def load_skill(skills: list, name: str, filename: str | None = None) -> str:
 
     rel = target.relative_to(skill_path)
     return (f"【Skill {matched['name']} 附件】{rel}\n\n{text}")
+
+
+# ========== 创建新 Skill ==========
+import re as _re
+
+_NAME_RE = _re.compile(r"^[a-z0-9][a-z0-9-_]{1,38}[a-z0-9]$")
+_MAX_DESC = 200
+_MAX_BODY = 20000
+
+
+def create_skill(name: str, description: str, body: str) -> str:
+    """在项目自带 .agents/skills/<name>/ 下创建新 Skill。
+
+    - 命名规则：小写字母/数字/连字符/下划线，2-40 字符
+    - 拒绝覆盖已存在的 Skill
+    - 自动生成 YAML frontmatter（name + description）
+    - 正文长度上限 20000 字符
+    创建成功后新 Skill 要等下次 /new 或重启才会被 discover_skills 扫到。
+    """
+    name = (name or "").strip()
+    description = (description or "").strip()
+    body = (body or "").strip()
+
+    if not _NAME_RE.match(name):
+        return (f"错误：Skill 名「{name}」不合法。规则：2-40 字符，只能含小写字母、数字、连字符、下划线，"
+                f"且首尾必须是字母或数字。")
+    if not description:
+        return "错误：description 不能为空（一句话说明这个 Skill 干什么、什么时候触发）。"
+    if len(description) > _MAX_DESC:
+        return f"错误：description 太长（{len(description)} 字符），请控制在 {_MAX_DESC} 字符以内。"
+    if not body:
+        return "错误：正文不能为空（写清楚这个 Skill 的执行步骤、规则、参考资料）。"
+    if len(body) > _MAX_BODY:
+        return f"错误：正文太长（{len(body)} 字符），请控制在 {_MAX_BODY} 字符以内。"
+
+    # 写到项目自带的 skills 目录（不写 E:/Office/ 那个共享目录）
+    target_dir = _PROJECT_ROOT / ".agents" / "skills" / name
+    target_md = target_dir / "SKILL.md"
+
+    if target_dir.exists():
+        return (f"错误：Skill 目录已存在 -> {target_dir}\n"
+                f"为避免覆盖已有成果，createSkill 拒绝重复创建。如要修改请直接编辑该目录下的文件。")
+
+    try:
+        target_dir.mkdir(parents=True, exist_ok=False)
+        content = (
+            "---\n"
+            f"name: {name}\n"
+            f'description: "{description.replace(chr(34), chr(39))}"\n'
+            "---\n\n"
+            f"{body}\n"
+        )
+        target_md.write_text(content, encoding="utf-8")
+    except FileExistsError:
+        return f"错误：Skill 目录已存在 -> {target_dir}"
+    except Exception as e:
+        return f"错误：创建 Skill 失败 -> {e}"
+
+    return (f"✅ Skill 已创建：{name}\n"
+            f"路径：{target_md}\n"
+            f"说明：{description}\n\n"
+            f"注意：当前会话的 System Prompt 已固化，新 Skill 要等下次 /new 或重启后才会出现在可用列表里。"
+            f"届时可调用 loadSkill(name=\"{name}\") 加载验证。")
+

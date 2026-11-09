@@ -13,6 +13,7 @@ import trafilatura
 from core.config import load_search_settings
 from core.context import recall_context as _recall_context
 from core.skills import load_skill as _load_skill
+from core.skills import create_skill as _create_skill
 
 TEXT_EXTS = {
     ".txt", ".md", ".py", ".json", ".csv", ".log", ".ini", ".cfg",
@@ -392,6 +393,11 @@ def dispatch(name: str, args: dict) -> str:
             _DISCOVERED_SKILLS,
             args["name"],
             args.get("filename"),
+        ),
+        "createSkill": lambda: _create_skill(
+            args["name"],
+            args["description"],
+            args["body"],
         ),
         "recallContext": lambda: _recall_context(
             args.get("text", ""),

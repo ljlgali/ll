@@ -109,27 +109,36 @@ class Agent:
         system_prompt = build_system_prompt(self.discovered_skills, self.mcp)
         self._reset_stats()
         self.messages = [{"role": "system", "content": system_prompt}]
-        # —— AGENTS.md 一次性注入 ——
-        agents_md_content = _load_agents_md()
-        if agents_md_content:
-            self.messages.append({
-                "role": "user",
-                "content": (
-                    "[AGENTS.md]\n"
-                    "以下是项目根目录 AGENTS.md 文件的内容，请你在整个会话中遵守这些项目规则。\n"
-                    "你不需要引用它，只需要默默地按其中的规则行事。\n\n"
-                    + agents_md_content
-                ),
-            })
-            self.messages.append({
-                "role": "assistant",
-                "content": "收到，我已经阅读并理解 AGENTS.md 中的项目规则，会在后续对话中遵守。",
-            })
+        # —— AGENTS.md 一次性注入（reset 时也会重新走一遍）——
+        self._inject_agents_md()
         # —— Token 使用统计 ——
         self.prompt_tokens = 0
         self.completion_tokens = 0
         # —— 压缩状态标志 ——
         self.compacting = False
+
+    def _inject_agents_md(self) -> None:
+        """把项目根目录 AGENTS.md 作为长期规则追加到 messages 末尾。
+        由 __init__ 和 reset() 共同调用，保证 /new 之后规则不丢。"""
+        content = _load_agents_md()
+        if not content:
+            return
+        # 长度截断（避免超长 AGENTS.md 直接撑爆上下文）
+        if len(content) > 4000:
+            content = content[:4000] + "\n...(AGENTS.md 过长，已截断)"
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "[AGENTS.md]\n"
+                "以下是项目根目录 AGENTS.md 文件的内容，请你在整个会话中遵守这些项目规则。\n"
+                "你不需要引用它，只需要默默地按其中的规则行事。\n\n"
+                + content
+            ),
+        })
+        self.messages.append({
+            "role": "assistant",
+            "content": "收到，我已经阅读并理解 AGENTS.md 中的项目规则，会在后续对话中遵守。",
+        })
 
     # ===== 会话统计（TUI 右侧栏直接读） =====
     def _reset_stats(self):
@@ -196,6 +205,7 @@ class Agent:
         register_skills(self.discovered_skills)
         system_prompt = build_system_prompt(self.discovered_skills, self.mcp)
         self.messages = [{"role": "system", "content": system_prompt}]
+        self._inject_agents_md()
         self.cancel_flag = False
         self._reset_stats()
         self.prompt_tokens = 0

@@ -16,15 +16,15 @@ pip install -r requirements.txt
 ```
 
 ## 配置
-复制 `.env` 并确认内容：
+复制 `.env.example` 为 `.env`，填入真实 API Key：
 ```ini
 ANYTHINGLLM_BASE_URL=http://localhost:3001
-ANYTHINGLLM_API_KEY=W4938X4-63RMMTG-JXY5K7R-GFJMR26
+ANYTHINGLLM_API_KEY=your-api-key-here
 ANYTHINGLLM_WORKSPACE_SLUG=
 MCP_HOST=0.0.0.0
 MCP_PORT=8000
 ```
-> `WORKSPACE_SLUG` 留空时自动使用第一个工作区。
+> `.env` 已加入 .gitignore，不会入库；`WORKSPACE_SLUG` 留空时自动使用第一个工作区。
 
 ## 启动
 前台启动（调试用，Ctrl+C 停止）：

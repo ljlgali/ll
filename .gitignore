@@ -16,3 +16,12 @@ Thumbs.db
 config.ini
 Agent/practice01/config.ini
 
+# 真实环境变量（.env.example 可入库）
+.env
+
+# Python 构建产物
+*.egg-info/
+
+# 运行时 session/context（已被 track 的需 git rm --cached）
+.agents/sessions/
+.agents/context/

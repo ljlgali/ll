@@ -3,41 +3,93 @@
 <head>
 <meta charset="UTF-8">
 <title>上传文档到 AnythingLLM</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  .row { margin: 12px 0; }
+  label { display: block; margin-bottom: 4px; color: #555; font-size: 14px; }
+  input[type=password], input[type=text] { width: 100%; padding: 8px; box-sizing: border-box; }
+  button { padding: 8px 20px; cursor: pointer; }
+  #msg { margin-top: 16px; padding: 10px; border-radius: 4px; white-space: pre-wrap; }
+  .ok { background: #e6ffed; color: #137333; }
+  .err { background: #ffebe9; color: #c5221f; }
+  .busy { opacity: .6; pointer-events: none; }
+</style>
 </head>
 <body>
-<h3>上传文档（自动向量化嵌入）</h3>
-<input type="file" id="f">
-<button onclick="upload()">上传</button>
+<h3>上传文档到 AnythingLLM（自动向量化嵌入）</h3>
+
+<div class="row">
+  <label>AnythingLLM API Key（只保存在你浏览器 localStorage，不写入源码）</label>
+  <input type="password" id="apiKey" placeholder="粘贴你的 AnythingLLM API Key">
+</div>
+<div class="row">
+  <label>AnythingLLM 地址</label>
+  <input type="text" id="apiBase" value="http://localhost:3001">
+</div>
+<div class="row">
+  <input type="file" id="f">
+  <button onclick="upload()" id="btn">上传并嵌入</button>
+</div>
 <p id="msg"></p>
 
 <script>
-const KEY = "W4938X4-63RMMTG-JXY5K7R-GFJMR26";
-const API = "http://localhost:3001/api/v1";
+// 从 localStorage 恢复上次的配置（key 不出现在源码里）
+const savedKey = localStorage.getItem("anythingllm_api_key");
+const savedBase = localStorage.getItem("anythingllm_api_base");
+if (savedKey) document.getElementById("apiKey").value = savedKey;
+if (savedBase) document.getElementById("apiBase").value = savedBase;
 
 async function upload() {
+  const KEY = document.getElementById("apiKey").value.trim();
+  const API = (document.getElementById("apiBase").value.trim() || "http://localhost:3001").replace(/\/$/, "") + "/api/v1";
   const file = document.getElementById("f").files[0];
-  if (!file) return alert("请选择文件");
+  const msg = document.getElementById("msg");
+  const btn = document.getElementById("btn");
 
-  // 1. 获取第一个工作区 slug
-  const res = await fetch(`${API}/workspaces`, { headers: { Authorization: `Bearer ${KEY}` } });
-  const data = await res.json();
-  const slug = data.workspaces[0].slug;
+  if (!KEY) { msg.className = "err"; msg.textContent = "请先填写 API Key"; return; }
+  if (!file) { msg.className = "err"; msg.textContent = "请选择文件"; return; }
 
-  // 2. 上传并嵌入
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("addToWorkspaces", slug);
+  // 记住配置
+  localStorage.setItem("anythingllm_api_key", KEY);
+  localStorage.setItem("anythingllm_api_base", API.replace(/\/api\/v1$/, ""));
 
-  const up = await fetch(`${API}/document/upload`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${KEY}` },
-    body: fd
-  });
+  btn.classList.add("busy");
+  msg.className = "";
+  msg.textContent = "上传中…";
 
-  const result = await up.json();
-  document.getElementById("msg").textContent = up.ok
-    ? `✅ 上传成功，已嵌入工作区：${slug}`
-    : `❌ 失败：${JSON.stringify(result)}`;
+  try {
+    // 1. 获取第一个工作区 slug
+    const res = await fetch(`${API}/workspaces`, { headers: { Authorization: `Bearer ${KEY}` } });
+    if (!res.ok) throw new Error(`获取工作区失败：HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.workspaces || !data.workspaces.length) throw new Error("没有找到任何工作区");
+    const slug = data.workspaces[0].slug;
+
+    // 2. 上传并嵌入
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("addToWorkspaces", slug);
+
+    const up = await fetch(`${API}/document/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${KEY}` },
+      body: fd
+    });
+    const result = await up.json();
+
+    if (up.ok) {
+      msg.className = "ok";
+      msg.textContent = `✅ 上传成功，已嵌入工作区：${slug}\n${JSON.stringify(result, null, 2)}`;
+    } else {
+      msg.className = "err";
+      msg.textContent = `❌ 失败：${JSON.stringify(result)}`;
+    }
+  } catch (e) {
+    msg.className = "err";
+    msg.textContent = `❌ 网络错误：${e.message}`;
+  } finally {
+    btn.classList.remove("busy");
+  }
 }
 </script>
 </body>

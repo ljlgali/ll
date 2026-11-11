@@ -64,6 +64,33 @@ LLM/
 - 安全与保护：文件工具路径边界、危险操作二次校验、单轮工具次数与超时上限、`.agents/logs/agent.log` 落盘日志
 - 详见 `Agent/LAgent/README.md`
 
+## 快速开始（分步）
+
+```powershell
+# 任务 1：宠物医院 MCP（需先启动 Go 后端 pethospital.exe，默认 127.0.0.1:8080）
+cd LLM\pet-hospital-mcp
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e ".[test]"
+.venv\Scripts\python.exe -m pet_hospital_mcp      # MCP 端点 http://127.0.0.1:8000/mcp
+
+# 任务 2：AnythingLLM MCP（需先启动本机 AnythingLLM，默认 localhost:3001）
+cd ..\anythingllm-mcp
+pip install -r requirements.txt
+copy .env.example .env                            # 填入 ANYTHINGLLM_API_KEY
+python server.py                                  # MCP 端点 http://127.0.0.1:8000/mcp
+
+# 任务 3：上传网页
+# 直接双击 anythingLLMServer\upload.html，填 API Key 后选文件上传
+
+# 附加：LAgent
+cd ..\Agent\LAgent
+pip install openai textual "mcp==2.0.0" requests trafilatura
+# 在 config.ini 填 [llm] 的 base_url / api_key / model
+python main.py
+```
+
+每个子项目的详细配置、验证步骤与已知限制见各自 README。
+
 ## 开发环境
 
 - Python 3.10+

@@ -123,6 +123,15 @@ description: 将会议记录整理成结构规范的会议纪要。触发词：�
 3. 模型判断相关时调用 `loadSkill(name, filename?)`，正文才进入上下文
 4. 附件读取做路径穿越防护：`resolve().relative_to(skill_path)`，越界一律拒绝
 
+### 仓库内附带的示例技能
+
+| 技能目录 | 来源 | 用途 |
+|---|---|---|
+| `crop-calendar` / `pest-control` / `policy-query` / `soil-analysis` / `weather-tips` / `小小加密` | 自写 | 演示 Frontmatter 格式与渐进加载 |
+| `guizang-ppt-skill` | **第三方开源技能包（整目录复制，保留其 LICENSE 与 README，未做改造）** | 演示「大体量技能」的按需加载与附件读取 |
+
+> `guizang-ppt-skill` 不是本项目自研成果，只作为技能目录的样例存在；评分/引用时请按其 `LICENSE` 标注来源。
+
 ## MCP Client
 
 **配置** `项目根/.mcp.json`，支持两种传输：

@@ -195,7 +195,9 @@ pytest -q
 pet_hospital_mcp/
 ├── pyproject.toml
 ├── README.md
-├── UPGRADE_PROMPT.md
+├── docs/archive/                 # 开发过程提示词存档（非本文档体系的一部分）
+│   ├── prompt-step1.md
+│   └── UPGRADE_PROMPT.md
 ├── src/pet_hospital_mcp/
 │   ├── __init__.py
 │   ├── __main__.py
@@ -209,6 +211,9 @@ pet_hospital_mcp/
 │       └── list_pets.py
 └── tests/
 ```
+
+> 说明：`UPGRADE_PROMPT.md`、`prompt-step1.md` 是**开发过程用的需求/升级提示词**，不是项目说明文档，
+> 已归档到 `docs/archive/`，与正式源码和 README 分开。阅读本项目请以 README 为准。
 
 ## 阶段说明
 - 本阶段仅实现 `list_pets` 工具。

@@ -195,10 +195,14 @@ def load_skill(skills: list, name: str, filename: str | None = None) -> str:
         return (f"【Skill：{matched['name']}】\n"
                 f"描述：{matched['description']}\n"
                 f"路径：{skill_path}\n\n"
-                f"{text}")
+                f"{_truncate_load(text, 'SKILL.md')}")
 
     # 加载附件文件
     filename = filename.strip()
+    # 前置拒绝：绝对路径与 .. 上跳一律不解析（比事后 relative_to 比对更早给出可读原因）
+    fname_parts = Path(filename).parts
+    if Path(filename).is_absolute() or ".." in fname_parts:
+        return f"错误：附件路径越界，已拒绝 -> {filename}（只允许 Skill 目录内的相对路径）"
     target = _resolve_file(skill_path, filename)
     if target is None:
         # 找不到或多匹配
@@ -227,7 +231,8 @@ def load_skill(skills: list, name: str, filename: str | None = None) -> str:
         return f"错误：读取附件失败 -> {e}"
 
     rel = target.relative_to(skill_path)
-    return (f"【Skill {matched['name']} 附件】{rel}\n\n{text}")
+    return (f"【Skill {matched['name']} 附件】{rel}\n\n"
+            f"{_truncate_load(text, f'附件 {rel}')}")
 
 
 # ========== 创建新 Skill ==========
@@ -236,6 +241,17 @@ import re as _re
 _NAME_RE = _re.compile(r"^[a-z0-9][a-z0-9-_]{1,38}[a-z0-9]$")
 _MAX_DESC = 200
 _MAX_BODY = 20000
+# 加载侧的内容上限：即使磁盘上的 SKILL.md / 附件被人为写得很大，
+# 也只在上下文里放这么多字符，避免一次性撑爆窗口（与创建侧 _MAX_BODY 对齐）
+_MAX_LOAD_CHARS = 20000
+
+
+def _truncate_load(text: str, label: str) -> str:
+    """加载内容的长度上限处理：超长截断并明确标注，不静默丢弃。"""
+    if len(text) > _MAX_LOAD_CHARS:
+        return (text[:_MAX_LOAD_CHARS]
+                + f"\n\n...（{label} 超过 {_MAX_LOAD_CHARS} 字符上限，已截断：原文 {len(text)} 字符）")
+    return text
 
 
 def create_skill(name: str, description: str, body: str) -> str:

@@ -8,6 +8,8 @@ __pycache__/
 # 虚拟环境
 venv/
 env/
+.venv/
+venv*/
 
 # 系统文件
 .DS_Store
@@ -25,3 +27,9 @@ Agent/practice01/config.ini
 # 运行时 session/context（已被 track 的需 git rm --cached）
 .agents/sessions/
 .agents/context/
+.agents/logs/
+
+# 测试与工具缓存
+.pytest_cache/
+.coverage
+htmlcov/

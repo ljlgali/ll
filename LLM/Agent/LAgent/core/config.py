@@ -67,6 +67,11 @@ def load_agent_settings() -> dict:
         "sessions_dir": _g("agent", "sessions_dir", ".agents/sessions"),
         "context_dir": _g("agent", "context_dir", ".agents/context"),
         "mcp_async_load": cfg.getboolean("agent", "mcp_async_load", fallback=True) if cfg.has_section("agent") else True,
+        # —— 工具循环保护 / 路径边界 / AGENTS.md 文件名（新增可配置项）——
+        "max_steps": cfg.getint("agent", "max_steps", fallback=12) if cfg.has_section("agent") else 12,
+        "round_timeout": cfg.getfloat("agent", "round_timeout", fallback=300.0) if cfg.has_section("agent") else 300.0,
+        "allowed_paths": _g("agent", "allowed_paths", ""),
+        "agents_md": _g("agent", "agents_md", ""),
     }
 
 

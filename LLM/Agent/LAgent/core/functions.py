@@ -6,6 +6,7 @@ import mimetypes
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import requests
 import trafilatura
@@ -36,6 +37,85 @@ _DISCOVERED_SKILLS = []
 # MCP 管理器：由 Agent 连接成功后通过 register_mcp() 注入
 _MCP_MANAGER = None
 
+# ===== 路径边界与危险操作保护 =====
+# 所有文件/目录工具都必须先过这道校验：目标必须落在允许根目录内。
+# 允许根默认是「项目根 + 当前工作目录」；如需放开，在 config.ini 的
+# [agent] allowed_paths 里用分号列出（支持相对项目根与绝对路径）。
+_LAGENT_ROOT = Path(__file__).resolve().parent.parent
+_ALLOWED_ROOTS: list[Path] = []
+# 绝不允许删除的系统目录前缀（小写、反斜杠归一化后比较）
+_PROTECTED_PREFIXES = ("c:\\windows", "c:\\program files", "c:\\programdata", "\\system32")
+
+
+def configure_path_guard(allowed_paths) -> None:
+    """由 Agent 初始化时注入允许根；传空表示使用默认根（项目根 + cwd）。"""
+    global _ALLOWED_ROOTS
+    roots: list[Path] = []
+    if allowed_paths:
+        for item in allowed_paths:
+            p = Path(str(item).strip()).expanduser()
+            if not p.is_absolute():
+                p = _LAGENT_ROOT / p
+            try:
+                roots.append(p.resolve())
+            except Exception:
+                continue
+    _ALLOWED_ROOTS = roots
+
+
+def _allowed_roots() -> list[Path]:
+    """允许的根目录列表：未配置时退化为「项目根 + 当前工作目录」。"""
+    if _ALLOWED_ROOTS:
+        return _ALLOWED_ROOTS
+    fallback = [_LAGENT_ROOT]
+    try:
+        cwd = Path(os.getcwd()).resolve()
+    except Exception:
+        cwd = None
+    if cwd is not None and cwd not in fallback:
+        fallback.append(cwd)
+    return fallback
+
+
+def _check_path(path: str) -> str | None:
+    """校验路径是否落在允许根内。返回错误说明；None 表示通过。"""
+    if path is None or not str(path).strip():
+        return "错误：路径不能为空"
+    try:
+        target = Path(str(path)).expanduser().resolve()
+    except Exception:
+        return f"错误：路径无法解析 -> {path}"
+    roots = _allowed_roots()
+    for root in roots:
+        try:
+            target.relative_to(root)
+            return None
+        except ValueError:
+            continue
+    return (f"错误：路径越界，已拒绝 -> {path}\n"
+            f"允许的根目录：{'、'.join(str(r) for r in roots)}\n"
+            f"如需放开请在 config.ini 的 [agent] allowed_paths 中追加（分号分隔）。")
+
+
+def _check_destructive(path: str) -> str | None:
+    """删除/改名类高危操作的额外校验：根目录本身与系统目录一律拒绝。"""
+    err = _check_path(path)
+    if err:
+        return err
+    try:
+        target = Path(str(path)).expanduser().resolve()
+    except Exception:
+        return f"错误：路径无法解析 -> {path}"
+    for root in _allowed_roots():
+        if target == root:
+            return f"错误：拒绝删除允许根目录本身 -> {path}"
+    normalized = str(target).replace("/", "\\").lower()
+    for prefix in _PROTECTED_PREFIXES:
+        if normalized.startswith(prefix):
+            return f"错误：拒绝删除系统目录 -> {path}"
+    return None
+
+
 
 def register_skills(skills: list) -> None:
     """Agent 初始化发现 Skill 后调用，注入到 functions 层"""
@@ -51,13 +131,27 @@ def register_mcp(mcp) -> None:
 
 
 def get_current_time() -> str:
-    """调用本地 date 命令获取当前日期和时间（不使用 Python datetime）"""
+    """调用本机系统命令获取当前日期时间（跨平台：Windows 用 date/time，类 Unix 用 date）。
+    系统命令不可用时退回读取系统时间，绝不写死。"""
     try:
-        r = subprocess.run("date /t & time /t", shell=True, capture_output=True, text=True)
-        out = (r.stdout or "").strip()
-        return out if out else f"未能获取本机时间（返回码 {r.returncode}）"
-    except Exception as e:
-        return f"调用本地 date 命令失败：{e}"
+        if os.name == "nt":
+            proc = subprocess.run(
+                ["cmd", "/c", "date /t & time /t"],
+                capture_output=True, text=True, timeout=10,
+            )
+        else:
+            proc = subprocess.run(
+                ["date", "+%Y-%m-%d %H:%M:%S %Z"],
+                capture_output=True, text=True, timeout=10,
+            )
+        out = (proc.stdout or "").strip()
+        if proc.returncode == 0 and out:
+            return f"本机当前日期时间（系统命令）：{out}"
+    except Exception:
+        pass
+    # 兜底：系统命令不可用（如受限环境）时读 Python 的系统时钟，仍非硬编码
+    from datetime import datetime
+    return f"本机当前日期时间（系统时钟）：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
 
 def is_leap_year(year: int) -> str:
@@ -75,6 +169,9 @@ def get_cwd() -> str:
 
 def list_files(path: str) -> str:
     """列出指定目录下的所有文件和子目录"""
+    err = _check_path(path)
+    if err:
+        return err
     if not os.path.isdir(path):
         return f"错误：目录不存在 -> {path}"
     items = os.listdir(path)
@@ -92,6 +189,9 @@ def list_files(path: str) -> str:
 
 def get_file_type(path: str) -> str:
     """获取指定文件的文件类型"""
+    err = _check_path(path)
+    if err:
+        return err
     if not os.path.exists(path):
         return f"错误：文件不存在 -> {path}"
     ext = os.path.splitext(path)[1].lower()
@@ -105,6 +205,9 @@ def get_file_type(path: str) -> str:
 
 def read_file(path: str) -> str:
     """获取指定纯文本文件的内容"""
+    err = _check_path(path)
+    if err:
+        return err
     if not os.path.isfile(path):
         return f"错误：文件不存在 -> {path}"
     if os.path.splitext(path)[1].lower() not in TEXT_EXTS:
@@ -121,6 +224,11 @@ def read_file(path: str) -> str:
 
 def create_file(dir_path: str, filename: str, content: str = "") -> str:
     """根据指定的目录和文件名创建新文件"""
+    err = _check_path(dir_path)
+    if err:
+        return err
+    if os.path.basename(filename or "") in ("", ".", ".."):
+        return f"错误：文件名不合法 -> {filename}"
     if not os.path.isdir(dir_path):
         return f"错误：目录不存在 -> {dir_path}"
     path = os.path.join(dir_path, filename)
@@ -136,6 +244,9 @@ def create_file(dir_path: str, filename: str, content: str = "") -> str:
 
 def edit_file(path: str, content: str, mode: str = "overwrite") -> str:
     """编辑指定纯文本文件：overwrite 覆盖 / append 追加"""
+    err = _check_path(path)
+    if err:
+        return err
     if not os.path.isfile(path):
         return f"错误：文件不存在 -> {path}"
     if os.path.splitext(path)[1].lower() not in TEXT_EXTS:
@@ -155,6 +266,9 @@ def edit_file(path: str, content: str, mode: str = "overwrite") -> str:
 
 def create_dir(path: str) -> str:
     """创建新目录"""
+    err = _check_path(path)
+    if err:
+        return err
     if os.path.exists(path):
         return f"错误：路径已存在，未创建 -> {path}"
     try:
@@ -165,7 +279,10 @@ def create_dir(path: str) -> str:
 
 
 def delete_dir(path: str) -> str:
-    """删除目录（支持非空目录）"""
+    """删除目录（支持非空目录）——高危操作，先过路径边界与系统目录校验"""
+    err = _check_destructive(path)
+    if err:
+        return err
     if not os.path.isdir(path):
         return f"错误：目录不存在 -> {path}"
     try:
@@ -177,7 +294,10 @@ def delete_dir(path: str) -> str:
 
 
 def delete_file(path: str) -> str:
-    """删除文件"""
+    """删除文件——高危操作，先过路径边界与系统目录校验"""
+    err = _check_destructive(path)
+    if err:
+        return err
     if not os.path.isfile(path):
         return f"错误：文件不存在 -> {path}"
     try:
@@ -189,6 +309,9 @@ def delete_file(path: str) -> str:
 
 def rename_path(path: str, new_name: str) -> str:
     """重命名文件或目录（保留原所在目录）"""
+    err = _check_destructive(path)
+    if err:
+        return err
     if not os.path.exists(path):
         return f"错误：路径不存在 -> {path}"
     target = os.path.join(os.path.dirname(path), os.path.basename(new_name))
@@ -249,8 +372,11 @@ def search_web(query: str) -> str:
 
 
 def _search_web_qianfan(query: str, key: str) -> str:
-    """千帆搜索（备用路径）"""
-    from core.agent import QIANFAN_SEARCH_URL, SEARCH_TIMEOUT
+    """千帆搜索（备用路径）
+
+    常量直接取自本模块（此前误从 core.agent 导入，agent 并未定义这两个符号，
+    导致 ImportError 让整个备用链路不可达）。
+    """
     try:
         payload = {
             "messages": [{"role": "user", "content": query}],

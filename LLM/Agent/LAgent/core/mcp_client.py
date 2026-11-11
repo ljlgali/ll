@@ -26,6 +26,7 @@ for _p in list(sys.path):
         sys.path.remove(_p)
 
 from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -33,19 +34,34 @@ CONNECT_TIMEOUT = 10       # 建立连接 + 发现工具的整体超时（秒）
 CALL_TIMEOUT = 30          # 单次 MCP 工具调用超时（秒）
 MAX_OUTPUT_CHARS = 8000   # 工具结果过长截断阈值（MCP 返回常含结构化数据，留足空间）
 
-# 支持的类型（.mcp.json 里的 type 字段，仅 Streamable HTTP）
-STREAMABLE_HTTP_TYPES = {"streamable_http", "streamablehttp", "http"}
+# 支持的传输类型（.mcp.json 里的 type 字段）
+STREAMABLE_HTTP_TYPES = {"streamable_http", "streamablehttp", "http", "streamable-http"}
+STDIO_TYPES = {"stdio", "local", "process"}
 
 
 @dataclass
 class MCPServer:
     """单个 MCP Server 的运行状态"""
     name: str
-    url: str
+    url: str = ""
+    command: str = ""                           # stdio 传输：可执行程序
+    args: list = field(default_factory=list)    # stdio 传输：命令行参数
+    env: dict = field(default_factory=dict)     # stdio 传输：额外环境变量
     queue: asyncio.Queue | None = None
     status: str = "pending"                     # pending / connected / failed
     error: str = ""
     tools: list = field(default_factory=list)   # 原始 mcp.types.Tool 列表
+
+    @property
+    def transport(self) -> str:
+        return "stdio" if self.command else "streamable_http"
+
+    @property
+    def endpoint(self) -> str:
+        """日志/状态里展示的连接目标：stdio 显示命令行，http 显示 URL"""
+        if self.command:
+            return " ".join([self.command] + [str(a) for a in self.args])
+        return self.url
 
 
 def load_mcp_config(path: str | Path | None = None) -> tuple[dict, str]:
@@ -222,10 +238,10 @@ class MCPManager:
         for server in self.servers.values():
             if server.status == "connected":
                 names = [n for n, (sn, _) in self.tool_map.items() if sn == server.name]
-                lines.append(f"✔ {server.name}（{server.url}）"
+                lines.append(f"OK {server.name}（{server.transport}: {server.endpoint}）"
                              f"工具 {len(names)} 个：{'、'.join(names)}")
             else:
-                lines.append(f"✘ {server.name}（{server.url}）"
+                lines.append(f"FAIL {server.name}（{server.transport}: {server.endpoint}）"
                              f"连接失败：{server.error or '未知原因'}")
         return "\n".join(lines)
 
@@ -245,13 +261,34 @@ class MCPManager:
             if not isinstance(cfg, dict):
                 self.errors.append(f"MCP Server「{name}」配置格式错误，已跳过")
                 continue
-            url = str(cfg.get("url") or "").strip()
             stype = str(cfg.get("type") or "streamable_http").lower()
+            url = str(cfg.get("url") or "").strip()
+            command = str(cfg.get("command") or "").strip()
+            raw_args = cfg.get("args") or []
+            server_args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
+            raw_env = cfg.get("env") or {}
+            server_env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+
+            # —— 传输类型判定：stdio 用 command，HTTP 用 url ——
+            if stype in STDIO_TYPES or (command and stype not in STREAMABLE_HTTP_TYPES):
+                server = MCPServer(name=name, command=command, args=server_args, env=server_env)
+                self.servers[name] = server
+                if not command:
+                    server.status = "failed"
+                    server.error = "stdio 类型缺少 command 字段"
+                    continue
+                server.queue = self._make_queue()
+                evt = threading.Event()
+                asyncio.run_coroutine_threadsafe(self._serve_stdio(server, evt), self._loop)
+                pending.append((server, evt))
+                continue
+
             server = MCPServer(name=name, url=url)
             self.servers[name] = server
             if stype not in STREAMABLE_HTTP_TYPES:
                 server.status = "failed"
-                server.error = f"暂不支持的类型 {stype}（仅支持 Streamable HTTP）"
+                server.error = (f"不支持的类型 {stype}"
+                                f"（支持 streamable_http / http / stdio）")
                 continue
             if not url.lower().startswith(("http://", "https://")):
                 server.status = "failed"
@@ -339,6 +376,47 @@ class MCPManager:
         except Exception as e:
             server.status = "failed"
             server.error = _describe_error(e)
+        finally:
+            ready.set()
+
+    async def _serve_stdio(self, server: MCPServer, ready: threading.Event) -> None:
+        """stdio 传输：拉起本地子进程，用 stdin/stdout 管道承载 MCP 协议。
+        stdin/stdout 即传输通道，不需要 HTTP 端点。"""
+        try:
+            params = StdioServerParameters(
+                command=server.command,
+                args=server.args,
+                env=server.env or None,
+            )
+            async with stdio_client(params) as streams:
+                read, write = streams[0], streams[1]
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    server.tools = list(result.tools or [])
+                    server.status = "connected"
+                    ready.set()
+                    while not self._closing:
+                        item = await server.queue.get()
+                        if item is None:
+                            break
+                        cfut, tool_name, args = item
+                        if cfut.set_running_or_notify_cancel() is False:
+                            continue
+                        try:
+                            res = await session.call_tool(tool_name, args)
+                            cfut.set_result(_format_result(res))
+                        except Exception as e:
+                            cfut.set_result(
+                                f"错误：调用 MCP 工具 {tool_name} 失败 -> "
+                                f"{type(e).__name__}: {e}"
+                            )
+        except FileNotFoundError as e:
+            server.status = "failed"
+            server.error = f"stdio 启动失败：找不到命令 {server.command}（{e}）"
+        except Exception as e:
+            server.status = "failed"
+            server.error = f"stdio 连接失败：{_describe_error(e)}"
         finally:
             ready.set()
 

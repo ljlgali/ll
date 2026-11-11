@@ -5,7 +5,7 @@
 ## 功能特性
 
 - 多轮对话 + 流式输出，工具调用结果实时展示（含耗时）
-- 16 个内置工具：时间、文件系统、联网搜索/抓取、命令行执行
+- 18 个内置工具：时间、文件系统、联网搜索/抓取、命令行执行、Skill 管理、历史检索
 - **Skill 机制**：扫描 `.agents/skills/`，只把 `name` + `description` 注入 System Prompt，正文按需 `loadSkill` 加载
 - **MCP Client**：读取 `.mcp.json`，通过 MCP SDK 连接外部 Server，将其工具动态注册为本地 Function Calling 工具
 - Esc 中断、会话重置、会话统计（`session_id` / 轮次 / 工具次数）
@@ -25,10 +25,12 @@ LAgent/
 ├── core/                  业务核心层（无任何界面代码）
 │   ├── config.py          读取 config.ini，创建 OpenAI 兼容客户端
 │   ├── tools.py           build_system_prompt() + 全部工具 JSON Schema
-│   ├── functions.py       工具实现 + dispatch 统一分发
+│   ├── functions.py       工具实现 + dispatch 统一分发 + 路径边界校验
 │   ├── skills.py          Skill 发现、Frontmatter 解析、按需加载
-│   ├── mcp_client.py      MCP 配置读取、连接、工具注册与调用转发
-│   └── agent.py           Agent：历史管理、流式请求、工具循环、统计
+│   ├── mcp_client.py      MCP 配置读取、连接（HTTP / stdio）、工具注册与调用转发
+│   └── agent.py           Agent：历史管理、流式请求、工具循环、统计、落盘日志
+├── tests/
+│   └── test_core.py       离线自测（unittest，无网络无模型）
 └── tui/                   终端界面层（不含业务逻辑）
     └── app.py             对话区 / 输入框 / 右侧栏 / Slash 命令
 ```
@@ -36,7 +38,7 @@ LAgent/
 ## 环境准备
 
 ```powershell
-D:\东软软件\课堂python\.venv\Scripts\python.exe -m pip install openai textual mcp
+D:\东软软件\课堂python\.venv\Scripts\python.exe -m pip install openai textual "mcp==2.0.0" requests trafilatura
 ```
 
 `config.ini`：
@@ -49,7 +51,20 @@ model = deepseek-chat
 
 [search]
 baidu_qianfan_api_key = xxxxxxxx
+
+[agent]
+; 单轮工具往返上限（默认 12）
+max_steps = 12
+; 单轮墙钟上限，秒（默认 300）
+round_timeout = 300
+; 文件工具允许的根目录，分号分隔；留空=项目根 + 当前工作目录
+allowed_paths =
+; 项目规则文件名；留空则依次找 AGENTS.md / AGENT.md / CLAUDE.md / .agents.md
+agents_md =
 ```
+
+> `mcp` 固定 2.0.0：本仓库 `pet-hospital-mcp` 与 `anythingllm-mcp` 都基于 2.x 的
+> `mcp.server.mcpserver.MCPServer`，2.x 已移除 `mcp.server.fastmcp`。
 
 ## 运行
 
@@ -110,7 +125,7 @@ description: 将会议记录整理成结构规范的会议纪要。触发词：�
 
 ## MCP Client
 
-**配置** `项目根/.mcp.json`：
+**配置** `项目根/.mcp.json`，支持两种传输：
 
 ```json
 {
@@ -118,22 +133,59 @@ description: 将会议记录整理成结构规范的会议纪要。触发词：�
     "Bazi-MCP": {
       "type": "streamable_http",
       "url": "https://mcp.api-inference.modelscope.net/xxxx/mcp"
+    },
+    "local-echo": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["E:/path/to/my_mcp_server.py"],
+      "env": {"MY_VAR": "1"}
     }
   }
 }
 ```
 
+- `type: streamable_http` / `http` → 走 HTTP，读 `url`
+- `type: stdio` → **拉起本地子进程**，stdin/stdout 即传输通道，读 `command` / `args` / `env`
+
 **工作流程**：
 
 1. 启动时 `MCPManager.start()` 读配置（查找顺序：`cwd` → 项目根）
-2. 后台线程运行独立 asyncio 事件循环，用 `streamable_http_client` 连接并常驻
+2. 后台线程运行独立 asyncio 事件循环：HTTP 用 `streamable_http_client`，stdio 用 `StdioServerParameters` + `stdio_client` 拉起子进程
 3. `initialize()` → `list_tools()` 发现工具
 4. 转成 OpenAI Function Calling Schema，与本地工具合并为同一份 `tools` 列表
 5. LLM 调用时经 `dispatch()` 转发到对应 Server，结果归一化（文本块 / 结构化数据 / 错误标记）后回传
 
 **名称冲突**：与本地工具或其它 Server 重名时自动加前缀，例如 `Srv-A__readFile`。
 
-**容错**：连接失败会拆解 `ExceptionGroup` 输出真实原因（如 `ConnectError: All connection attempts failed`），本地工具不受影响；单个调用超时 30 秒。
+**容错**：连接失败会拆解 `ExceptionGroup` 输出真实原因（如 `ConnectError: All connection attempts failed`）；stdio 启动时命令不存在会单独报「找不到命令」。本地工具不受影响；单个调用超时 30 秒。
+
+## 安全与运行保护
+
+| 保护 | 行为 | 可配置项（`config.ini` `[agent]`） |
+|---|---|---|
+| 路径边界 | 所有文件/目录工具先过 `_check_path`，目标必须落在允许根内，越界直接返回可读错误 | `allowed_paths`（分号分隔，默认=项目根 + cwd） |
+| 危险操作 | `deleteDir` / `deleteFile` / `renamePath` 额外过 `_check_destructive`：拒绝删除允许根目录本身与 `C:\Windows`、`C:\Program Files` 等系统目录 | 同上 |
+| 工具循环上限 | 单轮最多 12 次工具往返，超限中止并提示调大 | `max_steps`（默认 12） |
+| 单轮超时 | 单轮墙钟上限 300 秒，同时作为单次请求的超时约束 | `round_timeout`（默认 300） |
+| 落盘日志 | 会话开始 / 每轮开始 / 每次工具调用（名称、耗时、参数摘要、成功或错误）与异常堆栈追加写入 `.agents/logs/agent.log` | — |
+| 项目规则文件 | 自动注入 `<项目根>/AGENTS.md`，兼容 `AGENT.md` / `CLAUDE.md` / `.agents.md`，超 4000 字符截断 | `agents_md`（指定文件名） |
+| 加载内容上限 | `loadSkill` 返回的 SKILL.md / 附件超 20000 字符截断并标注原文长度 | — |
+
+`AGENTS.md` 会在启动和 `/new` 后各注入一次，保证换会话后规则不丢。
+
+## 测试
+
+```powershell
+cd /d E:\LLM\LLM\Agent\LAgent
+python -m unittest discover -s tests -v
+```
+
+`tests/test_core.py` 用标准库 `unittest`，**不联网、不调模型**，覆盖：Skill frontmatter 解析、Skill 命名校验、附件路径穿越拒绝、加载截断、文件工具路径边界、危险操作保护、闰年规则与时间工具返回值。
+
+## 已知限制
+
+- `.mcp.json` 查找只覆盖「当前目录」与「项目根」两处
+- 上下文压缩依赖 LLM 生成摘要，压缩期间不接受新输入
 
 ## TUI 命令与快捷键
 
@@ -142,7 +194,8 @@ description: 将会议记录整理成结构规范的会议纪要。触发词：�
 | `/new`、`/reset`、`/clear` | 重置会话（自动保存当前会话 + 重新发现 Skill，MCP 连接保持不变，AGENTS.md 重新注入） |
 | `/save` | 手动保存当前会话到 `.agents/sessions/` |
 | `/sessions`、`/ls` | 列出所有已保存会话 |
-| `/resume <id>` | 恢复历史会话（不带 id 时弹出选择面板） |
+| `/resume` | 不带 id 时**只打印已保存会话列表**（session_id + 时间 + 首条消息），不弹面板 |
+| `/resume <id>` | 按 session_id 恢复指定历史会话 |
 | `/compact` | 手动触发上下文压缩（旧历史归档为 JSONL，LLM 生成摘要替换） |
 | `/skills` | 列出已发现的 Skill |
 | `/mcp` | 查看 MCP Server 连接状态与已注册工具 |

@@ -5,18 +5,23 @@
 
 ## 文件说明
 
-| 文件 | 对应作业 | 工具数 | 新增内容 |
-|---|---|---|---|
-| `chat1.py` | （一） | 1 | `getDate`：获取本机日期时间，**调用本地 date 命令**实现 |
-| `chat2.py` | （二） | 2 | `isLeapYear`：判断闰年，**用 python 代码计算** |
-| `chat3.py` | （三） | 12 | 本地文件操作 10 个：获取当前目录、列出目录内容、获取文件类型、读取文件内容、创建文件、编辑文件、创建目录、删除目录、删除文件、重命名文件和目录 |
-| `chat1_architecture.mmd` | （四） | — | chat1 的 Mermaid 代码架构图 |
-| `chat2_architecture.mmd` | （四） | — | chat2 的 Mermaid 代码架构图 |
-| `chat3_architecture.mmd` | （四） | — | chat3 的 Mermaid 代码架构图 |
-| `config.ini` | — | — | 模型配置，三个程序共用 |
+| 文件 | 作用 | 说明 |
+|---|---|---|
+| `chat.py` | 唯一的可运行程序，12 个内置工具 | 把作业（一）~（三）的三个阶段合并到一处：`getDate` → `isLeapYear` → 10 个文件操作工具，避免三份高度重复的代码 |
+| `chat_architecture.mmd` | Mermaid 源码，描述 `chat.py` 的调用链 | 工具注册 → 模型返回 tool_calls → 本地分发 → 结果回填 → 继续循环 |
+| `config.ini` | 模型配置 | 与 `chat.py` 同目录，被 `.gitignore` 忽略，不入库 |
 
-三个版本是递进关系：`chat2.py` = `chat1.py` + isLeapYear，`chat3.py` = `chat2.py` + 文件操作工具。
-每个文件开头都注明了"基于哪个文件开发"和"相对上一版改动了哪几处"。
+`chat.py` 的 12 个工具：
+
+| 类别 | 工具 |
+|---|---|
+| 时间 | `getDate`（调用本机 `date /t & time /t` 取系统时间）、`isLeapYear`（Python 计算闰年） |
+| 目录 | `getCwd`、`listFiles`、`createDir`、`deleteDir` |
+| 文件 | `getFileType`、`readFile`、`createFile`、`editFile`、`deleteFile`、`renamePath` |
+
+> 历史说明：早期版本按作业拆成 `chat1.py` / `chat2.py` / `chat3.py` 三个递进文件，
+> 后因三份代码工具定义与主循环高度重复，合并为单个 `chat.py`（12 个工具一次到位），
+> 三个阶段的差异写在本节与 `chat.py` 开头注释里。
 
 ## 环境准备
 
@@ -40,14 +45,14 @@
 `config.ini` 必须与程序文件放在同一个目录下（程序按相对路径读取），然后：
 
 ```bash
-python chat1.py     # 或 chat2.py / chat3.py
+python chat.py
 ```
 
 按提示输入问题即可，例如：
 
-- `现在几点了`（chat1 起）
-- `2026 年是闰年吗`（chat2 起）
-- `列出 E:\LLM\LLM\Agent\practice02 目录下的所有文件`（chat3）
+- `现在几点了`
+- `2026 年是闰年吗`
+- `列出 E:\LLM\LLM\Agent\practice02 目录下的所有文件`
 
 程序会在调用工具时打印 `[LOG] 调用工具 xxx`，便于观察工具链路。
 按 `Ctrl+C` 退出（在 cmd 或 PyCharm 的 Terminal 中有效；PyCharm 的 Run 窗口会把 Ctrl+C 当作复制）。
@@ -57,4 +62,4 @@ python chat1.py     # 或 chat2.py / chat3.py
 - `getDate` 按要求调用本地 `date /t & time /t` 命令取系统时间，不使用 Python 的 `datetime`。
 - `isLeapYear` 按要求由 Python 代码本地计算：能被 4 整除且不能被 100 整除，或能被 400 整除。
 - 读取/编辑文件仅支持纯文本格式（`.txt .md .py .json .csv` 等），二进制文件会返回不支持。
-- 删除目录、删除文件、重命名属于高危操作，执行前请确认路径无误。
+- 删除目录、删除文件、重命名属于高危操作，执行前请确认路径无误（本练习未加路径边界，仅作教学示例）。

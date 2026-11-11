@@ -3,6 +3,7 @@
 # 对外暴露 chat_stream(user_input) 生成器，产出统一事件流，
 # 任何前端（tui / web / desktop / mobile）只需消费事件即可，无需关心 LLM 细节
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -15,13 +16,41 @@ from core.context import (
     estimate_messages_tokens,
     save_archive,
 )
-from core.functions import dispatch, register_skills, register_mcp
+from core.functions import configure_path_guard, dispatch, register_skills, register_mcp
 from core.mcp_client import MCPManager
 from core.skills import discover_skills
 from core.tools import build_system_prompt, TOOLS
 
 # 项目根目录（定位 config.ini 和 AGENTS.md）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# 工具循环保护默认值（可在 config.ini [agent] 段覆盖）
+MAX_TOOL_STEPS = 12          # 单轮对话里最多允许的工具往返次数
+ROUND_TIMEOUT_S = 300        # 单轮对话的墙钟上限（秒）
+
+# AGENTS.md 等价文件名候选（可用 config.ini [agent] agents_md 指定的优先）
+AGENTS_MD_CANDIDATES = ("AGENTS.md", "AGENT.md", "CLAUDE.md", ".agents.md")
+AGENTS_MD_MAX_CHARS = 4000
+
+
+def _setup_logger() -> logging.Logger:
+    """落盘日志：<项目根>/.agents/logs/agent.log，按行追加（stdlib，无额外依赖）"""
+    logger = logging.getLogger("lagent")
+    if logger.handlers:                      # 已初始化过，直接复用
+        return logger
+    logger.setLevel(logging.INFO)
+    try:
+        log_dir = _PROJECT_ROOT / ".agents" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_dir / "agent.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        logger.addHandler(handler)
+    except Exception:
+        logger.addHandler(logging.NullHandler())
+    logger.propagate = False
+    return logger
 
 
 def _friendly_error(e: Exception) -> str:
@@ -74,14 +103,20 @@ def _friendly_error(e: Exception) -> str:
     return f"❌ LLM 调用失败：{raw}"
 
 
-def _load_agents_md() -> str | None:
-    """如果项目根目录下存在 AGENTS.md，读取并返回内容；不存在返回 None"""
-    p = _PROJECT_ROOT / "AGENTS.md"
-    if p.exists():
-        try:
-            return p.read_text(encoding="utf-8").strip()
-        except Exception:
-            return None
+def _load_agents_md(filename: str | None = None) -> str | None:
+    """读取项目根目录下的 AGENTS.md（兼容 AGENT.md / CLAUDE.md 等等价命名）。
+    文件名可用 config.ini 的 [agent] agents_md 指定；不存在时返回 None（不报错）。"""
+    candidates = []
+    if filename:
+        candidates.append(Path(filename))
+    candidates.extend(Path(n) for n in AGENTS_MD_CANDIDATES)
+    for name in candidates:
+        p = name if name.is_absolute() else _PROJECT_ROOT / name
+        if p.is_file():
+            try:
+                return p.read_text(encoding="utf-8").strip()
+            except Exception:
+                return None
     return None
 
 
@@ -99,6 +134,12 @@ class Agent:
         # 警告阈值从 config.ini 读取（硬编码 WARNING_RATIO 作为兜底）
         agent_cfg = load_agent_settings()
         self.warning_ratio = agent_cfg.get("warning_ratio", WARNING_RATIO)
+        # —— 工具循环保护与路径边界（均可由 config.ini [agent] 段覆盖）——
+        self.max_steps = int(agent_cfg.get("max_steps", MAX_TOOL_STEPS) or MAX_TOOL_STEPS)
+        self.round_timeout = float(agent_cfg.get("round_timeout", ROUND_TIMEOUT_S) or ROUND_TIMEOUT_S)
+        self.agents_md_name = (agent_cfg.get("agents_md") or "").strip() or None
+        allowed_paths = [p for p in (agent_cfg.get("allowed_paths") or "").split(";") if p.strip()]
+        configure_path_guard(allowed_paths)
         # —— Skill 发现：初始化时扫描一次，只加载 name / description ——
         self.discovered_skills = discover_skills()
         register_skills(self.discovered_skills)
@@ -116,16 +157,23 @@ class Agent:
         self.completion_tokens = 0
         # —— 压缩状态标志 ——
         self.compacting = False
+        # —— 落盘日志（.agents/logs/agent.log）——
+        self.log = _setup_logger()
+        self.log.info(
+            "session_start session=%s skills=%d mcp_tools=%d steps_max=%d timeout=%.0fs",
+            self.session_id, len(self.discovered_skills), len(self.mcp.schemas),
+            self.max_steps, self.round_timeout,
+        )
 
     def _inject_agents_md(self) -> None:
         """把项目根目录 AGENTS.md 作为长期规则追加到 messages 末尾。
         由 __init__ 和 reset() 共同调用，保证 /new 之后规则不丢。"""
-        content = _load_agents_md()
+        content = _load_agents_md(self.agents_md_name)
         if not content:
             return
         # 长度截断（避免超长 AGENTS.md 直接撑爆上下文）
-        if len(content) > 4000:
-            content = content[:4000] + "\n...(AGENTS.md 过长，已截断)"
+        if len(content) > AGENTS_MD_MAX_CHARS:
+            content = content[:AGENTS_MD_MAX_CHARS] + "\n...(AGENTS.md 过长，已截断)"
         self.messages.append({
             "role": "user",
             "content": (
@@ -384,9 +432,28 @@ class Agent:
         self.cancel_flag = False
         # 每轮都带上完整工具集（本地工具 + MCP 工具 + recallContext）
         all_tools = TOOLS + self.mcp.schemas
+        # —— 单轮保护：最多 max_steps 次工具往返，整体不超过 round_timeout 秒 ——
+        steps = 0
+        round_start = time.time()
+        deadline = round_start + self.round_timeout
+        self.log.info("round_start session=%s round=%d input_chars=%d",
+                      self.session_id, self.round_count, len(user_input or ""))
         try:
             self.messages.append({"role": "user", "content": user_input})
             while True:
+                steps += 1
+                if steps > self.max_steps:
+                    self.log.warning("round_abort reason=max_steps steps=%d session=%s",
+                                     steps - 1, self.session_id)
+                    yield {"type": "error",
+                           "message": f"工具调用超过最大步数（{self.max_steps}），已中止本轮。"
+                                      f"可调大 config.ini [agent] max_steps 后重试。"}
+                    return
+                if time.time() > deadline:
+                    self.log.warning("round_abort reason=timeout session=%s", self.session_id)
+                    yield {"type": "error",
+                           "message": f"本轮耗时超过 {self.round_timeout:.0f} 秒上限，已中止。"}
+                    return
                 # 每一轮都带上 tools，模型才能正常发起工具调用
                 stream = self.client.chat.completions.create(
                     model=self.model,
@@ -394,6 +461,7 @@ class Agent:
                     tools=all_tools,
                     tool_choice="auto",
                     stream=True,
+                    timeout=max(30.0, deadline - time.time()),
                 )
                 reply = ""
                 calls = {}
@@ -448,11 +516,26 @@ class Agent:
 
                 for item in calls.values():
                     name = item["name"]
-                    args = json.loads(item["arguments"]) if item["arguments"] else {}
-                    t0 = time.perf_counter()
-                    result = dispatch(name, args)
-                    elapsed = (time.perf_counter() - t0) * 1000
-                    self.total_tool_calls += 1
+                    try:
+                        args = json.loads(item["arguments"]) if item["arguments"] else {}
+                    except json.JSONDecodeError as e:
+                        # 参数不是合法 JSON 时不静默失败：把错误当工具结果回填给模型，让它自己改
+                        args = {}
+                        result = f"错误：工具 {name} 的参数不是合法 JSON（{e}），请重新按 JSON 对象调用。"
+                        elapsed = 0.0
+                        self.log.warning("tool_bad_json name=%s session=%s", name, self.session_id)
+                    else:
+                        t0 = time.perf_counter()
+                        result = dispatch(name, args)
+                        elapsed = (time.perf_counter() - t0) * 1000
+                        self.total_tool_calls += 1
+                        self.log.info(
+                            "tool_call name=%s elapsed_ms=%.0f args=%s status=%s session=%s",
+                            name, elapsed,
+                            json.dumps(args, ensure_ascii=False)[:200],
+                            "error" if str(result).startswith("错误") else "ok",
+                            self.session_id,
+                        )
                     yield {"type": "tool", "name": name, "args": args,
                            "result": result, "elapsed_ms": elapsed}
                     self.messages.append({
@@ -461,5 +544,6 @@ class Agent:
                         "content": result
                     })
         except Exception as e:
+            self.log.exception("round_error session=%s", self.session_id)
             yield {"type": "error", "message": _friendly_error(e)}
 

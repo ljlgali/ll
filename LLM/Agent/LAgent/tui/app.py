@@ -490,7 +490,7 @@ class LAgentApp(App):
                 "  /new  —— 重置会话（自动保存当前 + 重新发现技能）\n"
                 "  /save  —— 手动保存当前会话\n"
                 "  /sessions  —— 列出所有已保存会话\n"
-                "  /resume  —— 恢复历史会话（弹选择面板）\n"
+                "  /resume  —— 列出已保存会话；恢复请用 /resume <会话编号>\n"
                 "  /quit  —— 退出（自动保存）\n"
                 "  /compact  —— 手动触发上下文压缩\n"
                 "  /skills  —— 列出当前技能\n"
